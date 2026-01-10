@@ -1,0 +1,13 @@
+[Unit]
+Description=Gomapp R plumber API
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/Rscript -e "plumber::pr('/opt/gomapp_api/plumber.R') |> plumber::pr_run(port=8000)"
+WorkingDirectory=/opt/gomapp_api
+Restart=always
+User=www-data
+EnvironmentFile=/opt/gomapp_api/.Renviron
+
+[Install]
+WantedBy=multi-user.target
