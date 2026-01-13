@@ -10,7 +10,6 @@ from kivy.uix.textinput import TextInput
 from kivy.uix.label import Label
 from kivy.uix.button import Button
 from kivy.uix.gridlayout import GridLayout
-from kivy.uix.behaviors import DragBehavior
 from kivy.core.window import Window
 from kivy.uix.widget import Widget
 from kivy.metrics import dp
@@ -33,6 +32,15 @@ import json
 import uuid
 import os.path
 from plyer import gps
+
+from assessment import GrowthCell, GrowthGrid
+from config import DB_PATH, API_URL
+from db_trials import upload_trials, download_trials
+from db_users import init_db, list_users, get_current_user_uuid, set_current_user_uuid, load_current_user_profile, create_user_profile, get_active_user
+from load_mbtiles import SafeMBTilesSource
+from load_tif import GeoTiffOverlay
+from popups import LocationPopup, TrialFormPopup, DraggableButton
+from file_picker import pick_files
 
 
 class MapScreen(Screen):
@@ -269,18 +277,16 @@ class RootWidget(FloatLayout):
         self.mapview.map_source = self.default_source
         self.mbtiles_source = None
 
+    def pick_mbtiles(self, *_):
+        pick_files(exts=(".mbtiles",), callback=self._on_mbtiles_picked, subdir="mbtiles")
 
-    def pick_mbtiles(self, instance):
-        chooser = FileChooserIconView(filters=["*.mbtiles"], rootpath = str(Path.home() / "Documents"))
-        popup = Popup(title="Select an MBTiles file", content=chooser, size_hint=(0.9, 0.9))
-
-        def load_selected_file(instance, selection, touch):
-            if selection:
-                popup.dismiss()
-                self.load_mbtiles(selection[0])
-
-        chooser.bind(on_submit=load_selected_file)
-        popup.open()
+    def _on_mbtiles_picked(self, selection):
+        print(f"In {selection}")
+        if not selection:
+            return
+        path = selection[0]
+        print(path)
+        self.load_mbtiles(path)
 
     def load_mbtiles(self, path):
         print(f"Loading MBTiles: {path}")
@@ -295,45 +301,17 @@ class RootWidget(FloatLayout):
         except Exception as e:
             print(f"❌ Error loading MBTiles: {e}")
 
-    def pick_geotiff(self, instance):
-        """Non-blocking file chooser popup for selecting a GeoTIFF."""
+    def pick_geotiff(self, *_):
+        pick_files(exts=(".tif", ".tiff"), callback=self._on_tif_picked, subdir="geotiff")
 
-        # Popup layout
-        layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        filechooser = FileChooserListView(filters=['*.tif', '*.tiff'], rootpath = str(Path.home() / "Documents"))
-        button_row = BoxLayout(size_hint_y=None, height='48dp', spacing=10)
-
-        select_button = Button(text="Select", size_hint_x=0.5)
-        cancel_button = Button(text="Cancel", size_hint_x=0.5)
-
-        button_row.add_widget(select_button)
-        button_row.add_widget(cancel_button)
-
-        layout.add_widget(filechooser)
-        layout.add_widget(button_row)
-
-        popup = Popup(title="Select a GeoTIFF", content=layout, size_hint=(0.9, 0.9))
-
-        # Handle file selection
-        def select_file(_instance):
-            if filechooser.selection:
-                file_path = filechooser.selection[0]
-                print(f"Loaded GeoTIFF: {file_path}")
-                popup.dismiss()
-
-                # ✅ Now call your existing overlay logic
-                overlay = GeoTiffOverlay(file_path, self.mapview)
-                self.mapview.add_widget(overlay)
-                self.geotiff_overlay = overlay
-
-        # Handle cancel
-        def cancel_file(_instance):
-            popup.dismiss()
-
-        select_button.bind(on_release=select_file)
-        cancel_button.bind(on_release=cancel_file)
-
-        popup.open()
+    def _on_tif_picked(self, selection):
+        if not selection:
+            return
+        path = selection[0]
+        # Use your existing GeoTIFF loader / overlay
+        overlay = GeoTiffOverlay(path, self.mapview)
+        self.mapview.add_widget(overlay)
+        self.geotiff_overlay = overlay
         
     def record_new_trial(self, instance):
         if self.lat is None or self.lon is None:

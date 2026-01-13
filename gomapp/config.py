@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 USER_RE  = re.compile(r"^[A-Za-z0-9_]{3,32}$")

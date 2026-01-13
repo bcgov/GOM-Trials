@@ -3,6 +3,7 @@ from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.textinput import TextInput
 from kivy.uix.label import Label
 from kivy.uix.button import Button
+from kivy.uix.behaviors import DragBehavior
 
 class LocationPopup(Popup):
     def __init__(self, default_lat, default_lon, on_confirm, **kwargs):
@@ -83,5 +84,5 @@ class TrialFormPopup(Popup):
         self.on_submit(data)
         self.dismiss()
 
-# class DraggableButton(DragBehavior, Button):
-#     pass
+class DraggableButton(DragBehavior, Button):
+    pass
