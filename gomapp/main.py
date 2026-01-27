@@ -22,6 +22,7 @@ from kivy.clock import mainthread, Clock
 from kivy.properties import StringProperty
 from kivy.resources import resource_find
 from kivy.uix.screenmanager import ScreenManager, Screen
+from kivy.animation import Animation
 import re
 import os
 import sys
@@ -34,14 +35,41 @@ import os.path
 from plyer import gps
 
 from assessment import GrowthCell, GrowthGrid
-from config import DB_PATH, API_URL
-from db_trials import upload_trials, download_trials
+from config import DB_PATH, API_URL, USER_RE
+from db_trials import upload_trials, download_trials, update_trial, get_trial_row
 from db_users import init_db, list_users, get_current_user_uuid, set_current_user_uuid, load_current_user_profile, create_user_profile, get_active_user
 from load_mbtiles import SafeMBTilesSource
 from load_tif import GeoTiffOverlay
-from popups import LocationPopup, TrialFormPopup, DraggableButton
+from popups import LocationPopup, TrialFormPopup, DraggableButton, EditTrialPopup
 from file_picker import pick_files
 
+from kivy.properties import BooleanProperty
+from kivy.graphics import Color, Rectangle
+
+class Scrim(Widget):
+    active = BooleanProperty(False)
+
+    def __init__(self, on_tap = None, **kwargs):
+        super().__init__(**kwargs)
+        self.on_tap = on_tap
+        with self.canvas:
+            self._color = Color(0, 0, 0, 0)
+            self._rect = Rectangle(pos=self.pos, size=self.size)
+        self.bind(pos=self._update, size=self._update, active=self._update_alpha)
+
+    def _update(self, *args):
+        self._rect.pos = self.pos
+        self._rect.size = self.size
+
+    def _update_alpha(self, *args):
+        self._color.a = 0.35 if self.active else 0
+
+    def on_touch_down(self, touch):
+        if self.active and self.collide_point(*touch.pos):
+            if self.on_tap:
+                self.on_tap()
+            return True
+        return super().on_touch_down(touch)
 
 class MapScreen(Screen):
     def __init__(self, **kwargs):
@@ -130,49 +158,69 @@ class LoginScreen(Screen):
 class RootWidget(FloatLayout):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.orientation = "vertical"
+        
         self.geotiff_overlay = None
         self.marker = None
         self.trial_markers = []
+        
         self.mapview = MapView(zoom=11, lat=49.0, lon=-123.0)
-
         self.default_source = self.mapview.map_source
         self.mbtiles_source = None
         
         self.add_widget(self.mapview)
+        
+        # --- Drawer config ---
+        self.drawer_w = dp(280)
+        self.drawer_open = False
+
+        # --- Scrim (tap to close) ---
+        self.scrim = Scrim(on_tap=self.close_drawer, size_hint=(1, 1))
+        self.add_widget(self.scrim)
+
+        # --- Drawer (starts off-screen to the left) ---
+        self.drawer = BoxLayout(
+            orientation="vertical",
+            size_hint=(None, 1),
+            width=self.drawer_w,
+            x=-self.drawer_w,
+            y=0,
+            spacing=dp(10),
+            padding=(dp(12), dp(20)),
+        )
+        self.add_widget(self.drawer)
+        
+        # Header row
+        header = BoxLayout(size_hint=(1, None), height=dp(48))
+        self.btn_close = Button(text="✕", size_hint=(None, 1), width=dp(48))
+        self.btn_close.bind(on_release=self.close_drawer)
+        header.add_widget(self.btn_close)
+
+        header.add_widget(Label(text="Menu", halign="left", valign="middle"))
+        self.drawer.add_widget(header)
         
         self.active_user_lbl = Label(
             text="Active User: (none)",
             size_hint=(None, None),
             height=dp(28),
             width=dp(260),
-            pos_hint={"x": 0.02, "top": 0.9},
             halign="left",
             valign="middle",
         )
         self.active_user_lbl.bind(size=lambda inst, *_: setattr(inst, "text_size", inst.size))
-        self.add_widget(self.active_user_lbl)
-
+        self.drawer.add_widget(self.active_user_lbl)
         self.refresh_active_user_label()
-        
-        # --- Dropdown menu setup ---
-        self.dropdown = DropDown(width = 500)
-        self.dropdown.auto_width = False
-        #self.bind(size=lambda *_: setattr(self.dropdown, "width", self.width * 0.7))
 
-        # Each button in dropdown
+        # Helper to add sidebar buttons
         def add_menu_item(label, callback):
-            text_w = Label(text=label, font_size="18sp").texture_size[0]
-            btn = Button(
+            b = Button(
                 text=label,
-                size_hint=(None, None),
-                width=self.dropdown.width,
-                height=75,
-                font_size="18sp"
+                size_hint=(1, None),
+                height=dp(52),
+                font_size="18sp",
             )
-            btn.bind(on_release=lambda btn: (self.dropdown.dismiss(), callback(btn)))
-            self.dropdown.add_widget(btn)
-            
+            b.bind(on_release=callback)
+            self.drawer.add_widget(b)
+
         add_menu_item("Upload GeoTIFF", self.pick_geotiff)
         add_menu_item("Upload MBTiles", self.pick_mbtiles)
         add_menu_item("Remove GeoTIFF", self.remove_geotiff)
@@ -180,17 +228,37 @@ class RootWidget(FloatLayout):
         add_menu_item("Record New Trial", self.record_new_trial)
         add_menu_item("Sync with Server", self.sync_with_server)
         add_menu_item("Change user", self.change_user_popup)
-
-        # --- Main menu button (top-right corner) ---
-        self.menu_btn = DraggableButton(
-            text="Options",
-            size_hint = (0.16,0.08),
-            pos_hint = {"right": 0.8, "top": 0.8}
-        )
-
-        self.menu_btn.bind(on_release=self.dropdown.open)
-        self.add_widget(self.menu_btn)
         
+        # Spacer to push things up
+        self.drawer.add_widget(Widget())
+        self.btn_open = Button(
+            text="☰",
+            size_hint=(None, None),
+            size=(dp(50), dp(50)),
+            pos_hint={"x": 0.02, "top": 0.98},
+        )
+        self.btn_open.bind(on_release=self.open_drawer)
+        self.add_widget(self.btn_open)
+        self._set_scrim(False)
+        
+    def _set_scrim(self, open_):
+        self.scrim.active = open_
+
+    def open_drawer(self, *_):
+        if self.drawer_open:
+            return
+        self.drawer_open = True
+        self._set_scrim(True)
+        Animation(x=0, d=0.18).start(self.drawer)
+
+    def close_drawer(self, *_):
+        if not self.drawer_open:
+            return
+        self.drawer_open = False
+        self._set_scrim(False)
+        Animation(x=-self.drawer_w, d=0.18).start(self.drawer)
+
+ 
     @mainthread
     def refresh_active_user_label(self, *_):
         try:
@@ -341,10 +409,10 @@ class RootWidget(FloatLayout):
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("""
-            INSERT INTO trials (uuid, species, seedlings, seedlot, spacing, lat, lon, user_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO trials (uuid, species, seedlings, seedlot, spacing, lat, lon, user_id, site_series, smr, snr, site_fact, site_prep)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (data["uuid"], data["species"], data["seedlings"], data["seedlot"],
-              data["spacing"], data["lat"], data["lon"], app.user_profile["username"]))
+              data["spacing"], data["lat"], data["lon"], get_active_user()["username"], data["site_series"], data["smr"], data["snr"], data["site_factors"], data["site_prep"]))
         conn.commit()
         conn.close()
         print("✅ Trial saved.")
@@ -421,6 +489,17 @@ class RootWidget(FloatLayout):
         delete_btn.bind(on_release=lambda instance: self.delete_trial(marker))
         box.add_widget(delete_btn)
         
+        # --- Edit Trial ---
+        edit_btn = Button(
+            text="Edit Trial",
+            size_hint_y=None,
+            height=64,
+            background_normal="",
+            background_color=(0.8, 0.2, 0.2, 0.9),
+        )
+        edit_btn.bind(on_release=lambda instance: self.open_edit_trial(marker))
+        box.add_widget(edit_btn)
+        
         growth_button = Button(
             text="Add Assessment",
             size_hint_y=None,
@@ -434,6 +513,24 @@ class RootWidget(FloatLayout):
         marker.add_widget(box)
         self.mapview.add_marker(marker)
         
+    def open_edit_trial(self, marker):
+        uuid = marker.uuid
+        trial = get_trial_row(uuid)
+        if not trial:
+            print("⚠️ Trial not found:", uuid)
+            return
+
+        def _on_save(edited):
+            update_trial(
+                uuid=uuid,
+                data=edited
+            )
+            print("✅ Trial updated locally, marked for sync")
+
+            # Optional: refresh markers/popup UI
+            # self.refresh_trial_marker(uuid)
+
+        EditTrialPopup(trial_row=trial, on_save=_on_save).open()
         
     def open_growth_popup(self, marker):
         """Open the 5×5 assessment grid for this trial."""
@@ -527,7 +624,8 @@ class TreeApp(App):
     def build(self):
         TreeApp.instance = self
         self.user_profile = None
-
+        #Window.softinput_mode = "pan"
+        
         init_db()
 
         sm = ScreenManager()

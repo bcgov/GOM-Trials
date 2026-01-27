@@ -2,7 +2,7 @@ import sqlite3
 from config import DB_PATH, API_URL
 from db_users import get_active_user
 import requests
-import datetime
+from datetime import datetime, timezone
 import json
 import uuid
 
@@ -102,3 +102,48 @@ def download_trials():
         print(f"⬇️  Downloaded {len(remote_trials)} records")
     except Exception as e:
         print("⚠️ Download error:", e)
+
+def utc_now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+def update_trial(uuid, data): ## Question: should we record who updated the trial?
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    ts = utc_now_iso()
+    cur.execute("""
+        UPDATE trials
+        SET species=?,
+            seedlings=?,
+            seedlot=?,
+            spacing=?,
+            site_series=?,
+            smr=?,
+            snr=?,
+            site_fact=?,
+            site_prep=?,
+            timestamp=?,
+            synced=0
+        WHERE uuid=?
+    """, (data["species"], data["seedlings"], data["seedlot"], data["spacing"],  ts, uuid, data["site_series"], data["smr"], data["snr"], data["site_factors"], data["site_prep"]))
+
+    conn.commit()
+    conn.close()
+    return ts
+    
+def get_trial_row(uuid):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT uuid, species, seedlings, seedlot, spacing, site_series, smr, snr, site_fact, site_prep
+        FROM trials
+        WHERE uuid=?
+    """, (uuid,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        return None
+
+    keys = ["uuid","species","seedlings","seedlot","spacing", "site_series", "smr", "snr", "site_factors", "site_prep"]
+    return dict(zip(keys, row))
