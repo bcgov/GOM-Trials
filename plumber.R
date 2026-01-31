@@ -18,7 +18,6 @@ pg_connect <- function() {
   )
 }
 
-#* Get trials updated after a timestamp
 #* @param since optional ISO timestamp (UTC)
 #* @get /trials
 function(req, res, since = NULL) {
@@ -26,30 +25,38 @@ function(req, res, since = NULL) {
   on.exit(dbDisconnect(con), add = TRUE)
   
   base_query <- "
-    WITH latest_assessment AS (
-      SELECT DISTINCT ON (trial_uuid)
-        trial_uuid,
-        growth_grid/
-      FROM assessments
-      ORDER BY trial_uuid, assessed_at DESC, created_at DESC
-    )
     SELECT
-      t.*,
-    la.growth_grid
-    FROM trials t
-    LEFT JOIN latest_assessment la
-      ON la.trial_uuid = t.uuid
+      uuid,
+      lat,
+      lon,
+      species,
+      seedlot,
+      seedlings,
+      spacing,
+      timestamp,
+      user_id,
+      growth_grid,
+
+      -- new site fields
+      site_series,
+      smr,
+      snr,
+      soil_site_factors,
+      site_prep
+    FROM gom_trials
   "
   
   if (!is.null(since) && nchar(since) > 0) {
-    query <- paste0(base_query, " WHERE t.timestamp > $1")
+    query <- paste0(base_query, " WHERE timestamp > $1")
     data  <- dbGetQuery(con, query, list(since))
   } else {
     data <- dbGetQuery(con, base_query)
   }
+  
   res$body <- jsonlite::toJSON(data, auto_unbox = TRUE, na = "null")
   res
 }
+
 
 #* Upsert trials from client
 #* @post /trials
@@ -62,36 +69,53 @@ function(req, res) {
   on.exit(dbDisconnect(con), add = TRUE)
   
   inserted <- 0
-  updated  <- 0
-  
+  # Loop over rows
   for (i in seq_len(nrow(body))) {
     t <- body[i, ]
-    # check if exists
-    q_check <- dbGetQuery(con, "SELECT lat FROM trials WHERE uuid=$1", list(t$uuid))
     
-    if (nrow(q_check) == 0) {
-      # insert
-      dbExecute(con, "
-        INSERT INTO trials (uuid, lat, lon, species, seedlot, seedlings, timestamp, growth_grid)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-      ",
-                params = list(t$uuid, t$lat, t$lon, t$species, t$seedlot,
-                              t$seedlings, t$timestamp, t$growth_grid))
-      inserted <- inserted + 1
-    } else {
-      message("Entry already exists - skipping")
-      # update (last-writer-wins)
-      # dbExecute(con, "
-      #   UPDATE trials
-      #   SET species=$2, seedlings=$3, seedlot=$4, spacing=$5,
-      #       lat=$6, lon=$7, updated_at=$8, deleted=$9, user_id=$10
-      #   WHERE uuid=$1
-      # ",
-      #           params = list(t$uuid, t$species, t$seedlings, t$seedlot, t$spacing,
-      #                         t$lat, t$lon, t$updated_at, t$deleted, t$user_id))
-      # updated <- updated + 1
-    }
+    result <- dbExecute(con, "
+      INSERT INTO gom_trials (
+        uuid,
+        lat, lon,
+        species, seedlot, seedlings, spacing,
+        timestamp, user_id, growth_grid,
+        site_series, smr, snr, soil_site_factors, site_prep
+      )
+      VALUES (
+        $1,$2,$3,
+        $4,$5,$6,$7,
+        $8,$9,$10,
+        $11,$12,$13,$14,$15
+      )
+      ON CONFLICT (uuid)
+      DO UPDATE SET
+        lat          = EXCLUDED.lat,
+        lon          = EXCLUDED.lon,
+        species      = EXCLUDED.species,
+        seedlot      = EXCLUDED.seedlot,
+        seedlings    = EXCLUDED.seedlings,
+        spacing      = EXCLUDED.spacing,
+        growth_grid  = EXCLUDED.growth_grid,
+        site_series  = EXCLUDED.site_series,
+        smr          = EXCLUDED.smr,
+        snr          = EXCLUDED.snr,
+        soil_site_factors = EXCLUDED.soil_site_factors,
+        site_prep    = EXCLUDED.site_prep,
+        timestamp    = EXCLUDED.timestamp
+      WHERE 
+        trials.timestamp IS NULL
+        OR EXCLUDED.timestamp >= trials.timestamp
+    ",
+                        params = list(
+                          t$uuid,
+                          t$lat, t$lon,
+                          t$species, t$seedlot, t$seedlings, t$spacing,
+                          t$timestamp, t$user_id, t$growth_grid,
+                          t$site_series, t$smr, t$snr, t$site_fact, t$site_prep
+                        ))
+    
+  insterted = insterted + 1
   }
   
-  list(inserted = inserted, updated = updated)
+  list(inserted = inserted)
 }
