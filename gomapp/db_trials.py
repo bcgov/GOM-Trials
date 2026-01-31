@@ -83,20 +83,26 @@ def download_trials():
 
         for t in remote_trials:
             cur.execute("""
-                INSERT INTO trials (uuid, species, seedlings, seedlot, lat, lon,
-                                    timestamp, synced, growth_grid)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+                INSERT INTO trials (uuid, user_id, species, seedlings, seedlot, spacing, lat, lon,
+                                    timestamp, growth_grid, site_series, smr, snr, site_fact, site_prep, synced)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT(uuid) DO UPDATE SET
                     species=excluded.species,
                     seedlings=excluded.seedlings,
                     seedlot=excluded.seedlot,
+                    spacing=excluded.spacing,
                     lat=excluded.lat,
                     lon=excluded.lon,
                     timestamp=excluded.timestamp,
                     synced=1,
-                    growth_grid=excluded.growth_grid
-            """, (t["uuid"], t["species"], t["seedlings"], t["seedlot"],
-                  t["lat"], t["lon"], t["timestamp"], t["growth_grid"]))
+                    growth_grid=excluded.growth_grid,
+                    site_series=excluded.site_series,
+                    smr=excluded.smr,
+                    snr=excluded.snr,
+                    site_fact=excluded.site_fact,
+                    site_prep=excluded.site_prep
+            """, (t["uuid"],t["user_id"], t["species"], t["seedlings"], t["seedlot"], t["spacing"],
+                  t["lat"], t["lon"], t["timestamp"], t["growth_grid"], t["site_series"], t["smr"], t["snr"], t["soil_site_factors"], t["site_prep"]))
         conn.commit()
         conn.close()
         print(f"⬇️  Downloaded {len(remote_trials)} records")
@@ -135,7 +141,7 @@ def get_trial_row(uuid):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""
-        SELECT uuid, species, seedlings, seedlot, spacing, site_series, smr, snr, site_fact, site_prep
+        SELECT uuid, user_id, species, seedlings, seedlot, spacing, site_series, smr, snr, site_fact, site_prep
         FROM trials
         WHERE uuid=?
     """, (uuid,))
@@ -145,5 +151,5 @@ def get_trial_row(uuid):
     if not row:
         return None
 
-    keys = ["uuid","species","seedlings","seedlot","spacing", "site_series", "smr", "snr", "site_factors", "site_prep"]
+    keys = ["uuid","user_id", "species","seedlings","seedlot","spacing", "site_series", "smr", "snr", "site_factors", "site_prep"]
     return dict(zip(keys, row))

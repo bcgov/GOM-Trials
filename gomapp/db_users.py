@@ -14,7 +14,7 @@ def init_db():
             species TEXT,
             seedlings INTEGER,
             seedlot TEXT,
-            spacing TEXT,
+            spacing REAL,
             lat REAL,
             lon REAL,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,

@@ -209,6 +209,15 @@ class IOSFilesChooser:
                 # Use filename for filtering (more reliable than full path for provider URLs)
                 name_obj = _objc_get(url, "lastPathComponent")
                 name = _nsstr(name_obj)
+
+                if not name or name.startswith("<"):
+                    # fallback: use path() instead
+                    try:
+                        p = _objc_get(url, "path")
+                        name = str(p.UTF8String()).split("/")[-1]
+                    except Exception:
+                        print("❌ Could not resolve file name")
+                        continue
                 print("📄 Picked name:", name)
 
                 if not name:

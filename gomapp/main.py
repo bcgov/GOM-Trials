@@ -23,6 +23,12 @@ from kivy.properties import StringProperty
 from kivy.resources import resource_find
 from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.animation import Animation
+from kivy.core.text import LabelBase
+from kivy.uix.modalview import ModalView
+from kivy.uix.spinner import Spinner
+
+from threading import Thread
+import time
 import re
 import os
 import sys
@@ -38,13 +44,14 @@ from assessment import GrowthCell, GrowthGrid
 from config import DB_PATH, API_URL, USER_RE
 from db_trials import upload_trials, download_trials, update_trial, get_trial_row
 from db_users import init_db, list_users, get_current_user_uuid, set_current_user_uuid, load_current_user_profile, create_user_profile, get_active_user
-from load_mbtiles import SafeMBTilesSource
+from load_mbtiles import SafeMBTilesMapSource, OSMSource, GoogleHybridSource, GoogleTerrainSource
 from load_tif import GeoTiffOverlay
 from popups import LocationPopup, TrialFormPopup, DraggableButton, EditTrialPopup
 from file_picker import pick_files
 
 from kivy.properties import BooleanProperty
 from kivy.graphics import Color, Rectangle
+
 
 class Scrim(Widget):
     active = BooleanProperty(False)
@@ -70,6 +77,22 @@ class Scrim(Widget):
                 self.on_tap()
             return True
         return super().on_touch_down(touch)
+        
+class BottomSafeZone(Widget):
+    def on_touch_down(self, touch):
+        if self.collide_point(*touch.pos):
+            return True  # swallow touches so map doesn't pan
+        return super().on_touch_down(touch)
+
+    def on_touch_move(self, touch):
+        if self.collide_point(*touch.pos):
+            return True
+        return super().on_touch_move(touch)
+
+    def on_touch_up(self, touch):
+        if self.collide_point(*touch.pos):
+            return True
+        return super().on_touch_up(touch)
 
 class MapScreen(Screen):
     def __init__(self, **kwargs):
@@ -161,7 +184,8 @@ class RootWidget(FloatLayout):
         
         self.geotiff_overlay = None
         self.marker = None
-        self.trial_markers = []
+        self.trial_markers = []     # list of marker widgets
+        self.trial_marker_uuids = set()   # fast duplicate check
         
         self.mapview = MapView(zoom=11, lat=49.0, lon=-123.0)
         self.default_source = self.mapview.map_source
@@ -221,18 +245,33 @@ class RootWidget(FloatLayout):
             b.bind(on_release=callback)
             self.drawer.add_widget(b)
 
-        add_menu_item("Upload GeoTIFF", self.pick_geotiff)
-        add_menu_item("Upload MBTiles", self.pick_mbtiles)
-        add_menu_item("Remove GeoTIFF", self.remove_geotiff)
-        add_menu_item("Remove MBTiles", self.remove_mbtiles)
-        add_menu_item("Record New Trial", self.record_new_trial)
+        #add_menu_item("Upload GeoTIFF", self.pick_geotiff)
+        add_menu_item("Record Trial", self.record_new_trial)
         add_menu_item("Sync with Server", self.sync_with_server)
         add_menu_item("Change user", self.change_user_popup)
+        #add_menu_item("Upload MBTiles", self.pick_mbtiles)
+        #add_menu_item("Remove GeoTIFF", self.remove_geotiff)
+        #add_menu_item("Remove MBTiles", self.remove_mbtiles)
+        
+        self.map_style_spinner = Spinner(
+            text="Map Type",
+            values=[
+                "OpenStreetMap",
+                "Google Hybrid",
+                "Google Terrain",
+                "Custom MBTiles",
+            ],
+            size_hint=(1, None),
+            height=dp(48),
+        )
+
+        self.map_style_spinner.bind(text=self.on_map_style_selected)
+        self.drawer.add_widget(self.map_style_spinner)
         
         # Spacer to push things up
         self.drawer.add_widget(Widget())
         self.btn_open = Button(
-            text="☰",
+            text="...",
             size_hint=(None, None),
             size=(dp(50), dp(50)),
             pos_hint={"x": 0.02, "top": 0.98},
@@ -240,6 +279,26 @@ class RootWidget(FloatLayout):
         self.btn_open.bind(on_release=self.open_drawer)
         self.add_widget(self.btn_open)
         self._set_scrim(False)
+        
+        self.safe_zone = BottomSafeZone(size_hint=(1, None), height=dp(28), pos_hint={"x": 0, "y": 0})
+        self.add_widget(self.safe_zone)
+        
+    def on_map_style_selected(self, spinner, value):
+        print(f"🌍 Switching to map style: {value}")
+
+        if value == "OpenStreetMap":
+            self.mapview.map_source = OSMSource()
+
+        elif value == "Google Hybrid":
+            self.mapview.map_source = GoogleHybridSource()
+
+        elif value == "Google Terrain":
+            self.mapview.map_source = GoogleTerrainSource()
+
+        elif value == "Custom MBTiles":
+            
+            self.pick_mbtiles()
+
         
     def _set_scrim(self, open_):
         self.scrim.active = open_
@@ -276,7 +335,7 @@ class RootWidget(FloatLayout):
         self.lat, self.lon = lat, lon
         # 2) Create/update marker
         if self.marker is None:
-            self.marker = MapMarker(lat=lat, lon=lon, source = "gps_purple.png")
+            self.marker = MapMarker(lat=lat, lon=lon)
             self.mapview.add_marker(self.marker)
             self.mapview.center_on(lat, lon)
         else:
@@ -294,15 +353,22 @@ class RootWidget(FloatLayout):
         user_list = BoxLayout(orientation="vertical", spacing=8, size_hint_y=None)
         user_list.bind(minimum_height=user_list.setter("height"))
 
-        popup = Popup(title="Change user", content=root, size_hint=(0.9, 0.9))
+        popup = ModalView(size_hint=(0.9, 0.9))
+        popup.add_widget(root)
+        popup.bind(on_dismiss=lambda *_: self.on_user_switched())
+
 
         def switch_to(user_uuid):
-            set_current_user_uuid(user_uuid)
-            prof = load_current_user_profile()
-            app.user_profile = prof
-            print(f"✅ Switched user to: {prof['username'] if prof else user_uuid}")
-            self.refresh_active_user_label()
-            popup.dismiss()
+                # Update stored user
+                set_current_user_uuid(user_uuid)
+                prof = load_current_user_profile()
+                app.user_profile = prof
+                print(f"✅ Switched user to: {prof['username'] if prof else user_uuid}")
+
+                # Refresh sidebar label etc.
+                self.refresh_active_user_label()
+                popup.dismiss()
+
 
         for u in users:
             label = f"{u['username']}  —  {u['name']}"
@@ -359,7 +425,7 @@ class RootWidget(FloatLayout):
     def load_mbtiles(self, path):
         print(f"Loading MBTiles: {path}")
         try:
-            source = SafeMBTilesSource(path)
+            source = SafeMBTilesMapSource(path)
             #source.bounds = (-123, -48, -117, 63)
             source.bounds = False
             print(f"Bounds:{source.bounds}")
@@ -392,12 +458,6 @@ class RootWidget(FloatLayout):
     def create_trial_at(self, lat, lon):
         print(f"Recording trial at {lat}, {lon}")
 
-        # Create a marker with popup
-        marker = MapMarkerPopup(lat=lat, lon=lon)
-        label = Label(text="New Trial", size_hint=(None, None), size=(100, 40))
-        marker.add_widget(label)
-        self.mapview.add_marker(marker)
-
         # Open form popup
         popup = TrialFormPopup(lat, lon, self.save_trial)
         popup.open()
@@ -417,89 +477,216 @@ class RootWidget(FloatLayout):
         conn.close()
         print("✅ Trial saved.")
         
-    @mainthread
+        self.add_trial_marker(
+            uuid=data["uuid"],
+            user_id=get_active_user()["username"],
+            trial_id=c.lastrowid,
+            species=data["species"],
+            seedlings=data["seedlings"],
+            seedlot=data["seedlot"],
+            spacing=data["spacing"],
+            lat=data["lat"],
+            lon=data["lon"],
+        )
+        
+        
+    def clear_all_trial_markers(self):
+        print("🧹 Clearing all trial markers")
+
+        # Remove markers from the map
+        for m in self.trial_markers:
+            try:
+                self.mapview.remove_widget(m)
+            except Exception as e:
+                print("⚠️ Error removing marker:", e)
+
+        # Reset tracking
+        self.trial_markers.clear()
+        self.trial_marker_uuids.clear()
+        
+    # Async stuff
+    def _load_trials_in_background(self):
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT uuid, user_id, id, species, seedlings, seedlot, spacing, lat, lon FROM trials")
+            rows = c.fetchall()
+            conn.close()
+
+            print(f"📥 Background loaded {len(rows)} trials")
+
+            # schedule adding them gradually
+            Clock.schedule_once(lambda dt: self._add_trial_markers_generator(rows))
+        except Exception as e:
+            print(f"⚠️ Background trial load error: {e}")
+            
+    def _add_trial_markers_generator(self, rows, batch_size=50):
+        """
+        Add markers in small batches so UI stays responsive.
+        """
+        total = len(rows)
+        idx = 0
+
+        def add_next_batch(dt):
+            nonlocal idx
+            end = min(idx + batch_size, total)
+
+            for i in range(idx, end):
+                uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon = rows[i]
+                if uuid not in self.trial_marker_uuids:
+                    self.add_trial_marker(uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon)
+
+            idx = end
+            #print(f"📍 Added {end} / {total}")
+
+            if idx < total:
+                # schedule next batch
+                Clock.schedule_once(add_next_batch, 0)
+            else:
+                print("✅ All markers added")
+
+        Clock.schedule_once(add_next_batch, 0)
+
+
+    def on_user_switched(self):
+        print("🧹 Clearing all trial markers")
+        self.clear_all_trial_markers()
+
+        # Load all rows in background
+        Thread(target=self._load_trials_in_background, daemon=True).start()
+
+
     def load_trials(self):
         """Load all saved trials from SQLite and show them as markers."""
         try:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
-            c.execute("SELECT uuid, id, species, seedlings, seedlot, spacing, lat, lon FROM trials")
+            c.execute("SELECT uuid, user_id, id, species, seedlings, seedlot, spacing, lat, lon FROM trials")
             rows = c.fetchall()
             conn.close()
 
             print(f"📍 Loaded {len(rows)} trials from DB")
 
             for row in rows:
-                uuid, trial_id, species, seedlings, seedlot, spacing, lat, lon = row
-                if uuid not in self.trial_markers:
-                    self.add_trial_marker(uuid, trial_id, species, seedlings, seedlot, spacing, lat, lon)
-                    self.trial_markers.append(uuid)
+                uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon = row
+                if uuid not in self.trial_marker_uuids:
+                    self.add_trial_marker(uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon)
+                    
 
         except Exception as e:
             print(f"⚠️ Error loading trials: {e}")
             
     def sync_with_server(self, instance):
         print("🔄 Starting sync...")
-        upload_trials()
         download_trials()
+        upload_trials()
         self.load_trials()   # refresh markers
         print("✅ Sync complete")
 
     
-    def add_trial_marker(self, uuid, trial_id, species, seedlings, seedlot, spacing, lat, lon):
-        """Create a marker for a trial and add it to the map."""
-        marker = MapMarkerPopup(lat=lat, lon=lon)
-        marker.trial_id = trial_id  # store id for deletion
+    def add_trial_marker(self, uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon):
+        """Create a lightweight marker which builds its popup only on tap."""
+        is_mine = (get_active_user()["username"] == user_id)
+        icon = "user_icon.png" if is_mine else "gps_purple.png"
+
+        marker = MapMarkerPopup(lat=lat, lon=lon, source=icon)
         marker.uuid = uuid
+        marker.trial_id = trial_id
 
-        # --- Build popup content ---
-        box = BoxLayout(orientation="vertical", spacing=4, padding=5, size_hint=(None, None))
-        box.size = (600,600)
+        # Store only the bare data needed to build the popup later
+        marker.trial_data = {
+            "uuid": uuid,
+            "user_id": user_id,
+            "species": species,
+            "seedlings": seedlings,
+            "seedlot": seedlot,
+            "spacing": spacing,
+            "lat": lat,
+            "lon": lon,
+        }
+
+        # Build popup lazily on tap
+        marker.bind(on_release=lambda instance: self.open_trial_popup(instance))
+
+        self.mapview.add_marker(marker)
+        self.trial_markers.append(marker)
+        self.trial_marker_uuids.add(uuid)
         
-        with box.canvas.before:
-            Color(0, 0, 0, 0.7)  # RGBA → black with 70% opacity
-            box._bg_rect = Rectangle(pos=box.pos, size=box.size)
+        
+    def open_trial_popup(self, marker):
+        """Builds a popup that looks like the old one (600x600 w/ translucent bg)."""
 
-        # Keep background aligned when widget resizes
-        def _update_bg(instance, value):
-            box._bg_rect.pos = instance.pos
-            box._bg_rect.size = instance.size
+        d = marker.trial_data
+
+        # Main container with explicit size
+        box = BoxLayout(
+            orientation="vertical",
+            spacing=4,
+            padding=5,
+            size_hint=(None, None),
+            width=600,
+            height=600,
+        )
+
+        # --- Background rectangle (shared texture, no per-marker memory bloat) ---
+        with box.canvas.before:
+            Color(0, 0, 0, 0.7)  # translucent black
+            bg = Rectangle(pos=box.pos, size=box.size)
+
+        def _update_bg(*_):
+            bg.pos = box.pos
+            bg.size = box.size
 
         box.bind(pos=_update_bg, size=_update_bg)
 
+        # --- Info text ---
         info_text = (
-            f"[b]Species:[/b] {species}\n"
-            f"[b]Seedlings:[/b] {seedlings}\n"
-            f"[b]Seedlot:[/b] {seedlot}\n"
-            f"[b]Spacing:[/b] {spacing}\n"
+            f"[b]User:[/b] {d['user_id']}\n"
+            f"[b]Species:[/b] {d['species']}\n"
+            f"[b]Seedlings:[/b] {d['seedlings']}\n"
+            f"[b]Seedlot:[/b] {d['seedlot']}\n"
+            f"[b]Spacing:[/b] {d['spacing']}\n"
         )
 
-        info_label = Label(text=info_text, markup=True, halign="left", valign="middle")
-        info_label.bind(size=lambda _, __: info_label.texture_update())
+        info_label = Label(
+            text=info_text,
+            markup=True,
+            halign="left",
+            valign="top",
+            size_hint=(1, None),
+        )
+        info_label.bind(
+            texture_size=lambda lbl, _: setattr(lbl, "height", lbl.texture_size[1])
+        )
         box.add_widget(info_label)
 
         # --- Delete button ---
         delete_btn = Button(
-            text="🗑️ Delete",
+            text="Delete",
             size_hint_y=None,
             height=64,
             background_normal="",
             background_color=(0.8, 0.2, 0.2, 0.9),
         )
-        delete_btn.bind(on_release=lambda instance: self.delete_trial(marker))
+        delete_btn.bind(
+            on_release=lambda *_: (popup.dismiss(), self.delete_trial(marker))
+        )
         box.add_widget(delete_btn)
-        
+
         # --- Edit Trial ---
         edit_btn = Button(
             text="Edit Trial",
             size_hint_y=None,
             height=64,
             background_normal="",
-            background_color=(0.8, 0.2, 0.2, 0.9),
+            background_color=(0.2, 0.4, 0.9, 0.9),
         )
-        edit_btn.bind(on_release=lambda instance: self.open_edit_trial(marker))
+        edit_btn.bind(
+            on_release=lambda *_: (popup.dismiss(), self.open_edit_trial(marker))
+        )
         box.add_widget(edit_btn)
-        
+
+        # --- Assessment ---
         growth_button = Button(
             text="Add Assessment",
             size_hint_y=None,
@@ -507,11 +694,21 @@ class RootWidget(FloatLayout):
             background_normal="",
             background_color=(0.8, 0.1, 0.8, 0.9),
         )
-        growth_button.bind(on_release=lambda instance: self.open_growth_popup(marker))
+        growth_button.bind(
+            on_release=lambda *_: (popup.dismiss(), self.open_growth_popup(marker))
+        )
         box.add_widget(growth_button)
 
-        marker.add_widget(box)
-        self.mapview.add_marker(marker)
+        # --- Popup wrapper ---
+        popup = Popup(
+            title=" ",
+            content=box,
+            size_hint=(None, None),
+            size=(660, 660),     # slightly larger container so 600px fits comfortably
+            auto_dismiss=True,
+        )
+
+        popup.open()
         
     def open_edit_trial(self, marker):
         uuid = marker.uuid
@@ -622,9 +819,11 @@ class TreeApp(App):
     instance = None
     
     def build(self):
+        
         TreeApp.instance = self
         self.user_profile = None
         #Window.softinput_mode = "pan"
+        #LabelBase.register(name="SF", fn_regular="System Font")
         
         init_db()
 

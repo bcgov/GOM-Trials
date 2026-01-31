@@ -105,7 +105,7 @@ class TrialFormPopup(Popup):
         self.seedlings = TextInput(hint_text="Number of Seedlings", input_filter="int",
                                    multiline=False, text_validate_unfocus = False, size_hint_y=None, height=dp(44))
         self.seedlot = TextInput(hint_text="Seedlot", multiline=False, text_validate_unfocus = False, size_hint_y=None, height=dp(44))
-        self.spacing = TextInput(hint_text="Spacing (e.g. 3x3m)", multiline=False, text_validate_unfocus = False, size_hint_y=None, height=dp(44))
+        self.spacing = TextInput(hint_text="Spacing (e.g. 2.0)", multiline=False, text_validate_unfocus = False, size_hint_y=None, height=dp(44))
         
                 # Fields inside site_box
         self.site_series = TextInput(
@@ -116,25 +116,25 @@ class TrialFormPopup(Popup):
         )
 
         self.smr = Spinner(
-            text="",
+            text="(Select)",
             values=SMR_OPTIONS,
             size_hint_y=None,
             height=dp(44),
         )
         self.snr = Spinner(
-            text="",
+            text="(Select)",
             values=SNR_OPTIONS,
             size_hint_y=None,
             height=dp(44),
         )
         self.site_factors = Spinner(
-            text="",
+            text="(Select)",
             values=SITE_FACTORS_OPTIONS,
             size_hint_y=None,
             height=dp(44),
         )
         self.site_prep = Spinner(
-            text="",
+            text="(Select)",
             values=SITE_PREP_OPTIONS,
             size_hint_y=None,
             height=dp(44),
@@ -212,7 +212,7 @@ class EditTrialPopup(Popup):
         self.seedlings_in = TextInput(text=str(trial_row.get("seedlings", "") or ""), multiline=False, input_filter="int",
                                       size_hint_y=None, height=dp(44))
         self.seedlot_in = TextInput(text=trial_row.get("seedlot", "") or "", multiline=False, size_hint_y=None, height=dp(44))
-        self.spacing_in = TextInput(text=trial_row.get("spacing", "") or "", multiline=False, size_hint_y=None, height=dp(44))
+        self.spacing_in = TextInput(text=str(trial_row.get("spacing", "") or ""), multiline=False, size_hint_y=None, height=dp(44))
         self.site_series = TextInput(text=trial_row.get("site_series", "") or "", multiline=False, size_hint_y=None, height=dp(44))
 
         self.smr = Spinner(text=trial_row.get("smr", "(Select)") or "(Select)", values=SMR_OPTIONS, size_hint_y=None, height=dp(44))
