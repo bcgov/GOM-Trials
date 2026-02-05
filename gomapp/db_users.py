@@ -50,6 +50,16 @@ def init_db():
             value TEXT
         )
     """)
+    
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS trial_photos (
+          photo_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          trial_uuid TEXT,
+          path TEXT NOT NULL,
+          created_at TEXT DEFAULT (datetime('now')),
+          FOREIGN KEY(trial_uuid) REFERENCES trials(uuid) ON DELETE CASCADE
+        )
+    """)
     conn.commit()
     conn.close()
 

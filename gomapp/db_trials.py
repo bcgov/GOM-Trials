@@ -153,3 +153,15 @@ def get_trial_row(uuid):
 
     keys = ["uuid","user_id", "species","seedlings","seedlot","spacing", "site_series", "smr", "snr", "site_factors", "site_prep"]
     return dict(zip(keys, row))
+    
+def get_first_photo_for_trial(trial_uuid):
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT path FROM trial_photos WHERE trial_uuid = ? ORDER BY photo_id ASC LIMIT 1",
+            (trial_uuid,)
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+

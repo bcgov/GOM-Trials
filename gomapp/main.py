@@ -26,6 +26,8 @@ from kivy.animation import Animation
 from kivy.core.text import LabelBase
 from kivy.uix.modalview import ModalView
 from kivy.uix.spinner import Spinner
+from pyobjus import autoclass, objc_str
+from pyobjus.dylib_manager import load_framework
 
 from threading import Thread
 import time
@@ -42,17 +44,18 @@ from plyer import gps
 
 from assessment import GrowthCell, GrowthGrid
 from config import DB_PATH, API_URL, USER_RE
-from db_trials import upload_trials, download_trials, update_trial, get_trial_row
+from db_trials import upload_trials, download_trials, update_trial, get_trial_row, get_first_photo_for_trial
 from db_users import init_db, list_users, get_current_user_uuid, set_current_user_uuid, load_current_user_profile, create_user_profile, get_active_user
 from load_mbtiles import SafeMBTilesMapSource, OSMSource, GoogleHybridSource, GoogleTerrainSource
 from load_tif import GeoTiffOverlay
 from popups import LocationPopup, TrialFormPopup, DraggableButton, EditTrialPopup
 from file_picker import pick_files
+#from photos import IOSPhotoPicker
 
 from kivy.properties import BooleanProperty
 from kivy.graphics import Color, Rectangle
-
-
+from kivy.uix.image import Image
+    
 class Scrim(Widget):
     active = BooleanProperty(False)
 
@@ -465,7 +468,7 @@ class RootWidget(FloatLayout):
     def save_trial(self, data):
         """Save submitted trial data into the SQLite DB."""
         print("Saving trial:", data)
-        app = App.get_running_app()
+        #app = App.get_running_app()
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("""
@@ -473,6 +476,11 @@ class RootWidget(FloatLayout):
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (data["uuid"], data["species"], data["seedlings"], data["seedlot"],
               data["spacing"], data["lat"], data["lon"], get_active_user()["username"], data["site_series"], data["smr"], data["snr"], data["site_factors"], data["site_prep"]))
+            
+        #save photo paths
+        for p in data.get("photo_paths", []):
+            c.execute("INSERT INTO trial_photos (trial_uuid, path) VALUES (?, ?)", (data["uuid"], p))
+
         conn.commit()
         conn.close()
         print("✅ Trial saved.")
@@ -659,6 +667,20 @@ class RootWidget(FloatLayout):
             texture_size=lambda lbl, _: setattr(lbl, "height", lbl.texture_size[1])
         )
         box.add_widget(info_label)
+        
+        photo_path = get_first_photo_for_trial(marker.uuid)
+        if photo_path:
+            view_btn = Button(
+                text="View Photo",
+                size_hint_y=None,
+                height=64,
+                background_normal="",
+                background_color=(0.2, 0.8, 0, 0.9),
+            )
+            view_btn.bind(
+                on_release=lambda *_: self.open_photo_popup(photo_path)
+            )
+            box.add_widget(view_btn)
 
         # --- Delete button ---
         delete_btn = Button(
@@ -709,6 +731,24 @@ class RootWidget(FloatLayout):
         )
 
         popup.open()
+        
+    def open_photo_popup(self, path):
+        # Full-size image widget
+        img = Image(
+            source=path,
+            allow_stretch=True,
+            keep_ratio=True,
+            size_hint=(1, 1),
+        )
+
+        popup = Popup(
+            title="Trial Photo",
+            content=img,
+            size_hint=(0.8, 0.8),
+            auto_dismiss=True,
+        )
+        popup.open()
+
         
     def open_edit_trial(self, marker):
         uuid = marker.uuid
@@ -817,6 +857,7 @@ class RootWidget(FloatLayout):
 
 class TreeApp(App):
     instance = None
+    picker_delegate = None
     
     def build(self):
         
@@ -847,6 +888,7 @@ class TreeApp(App):
         
         if self.root.current == "map":
             app = TreeApp.instance.get_root_widget().load_trials()
+
         
     def get_root_widget(self):
         """Convenience accessor for the existing RootWidget inside MapScreen."""
@@ -892,6 +934,73 @@ class TreeApp(App):
     def on_resume(self):
         gps.start(1000, 0)
         pass
+        
+#            
+#    def test_pick_image(self):
+#        print("Opening photo picker…")
+#
+#        picker = UIImagePickerController.alloc().init()
+#        picker.sourceType = 1  # Photo Library
+#
+#        delegate = ImagePickerDelegate.alloc().init()
+#        self.picker_delegate = delegate
+#
+#        picker.delegate = delegate
+#
+#        # Present picker
+#        app = UIApplication.sharedApplication()
+#        root = app.keyWindow.rootViewController()
+#        root.presentViewController_animated_completion_(picker, True, None)
+#
+#        # Start polling for result
+#        self._picker_poll_ev = Clock.schedule_interval(self.check_picker_result, 0.25)
+#        
+#    def check_picker_result(self, dt):
+#        docs = self.get_ios_documents_dir()
+#        ipc_dir = os.path.join(docs, "gomapp_ipc")
+#        result_file = os.path.join(ipc_dir, "picker_result.txt")
+#
+#        # Small, readable debug
+#        print("IPC dir:", ipc_dir)
+#        try:
+#            print("IPC listing:", os.listdir(ipc_dir))
+#        except FileNotFoundError:
+#            print("IPC dir missing")
+#            return
+#
+#        if not os.path.exists(result_file):
+#            return  # keep polling
+#
+#        with open(result_file, "r") as f:
+#            result = f.read().strip()
+#        os.remove(result_file)
+#
+#        print("Picked image result:", result)
+#        if getattr(self, "_picker_poll_ev", None) is not None:
+#            self._picker_poll_ev.cancel()
+#            self._picker_poll_ev = None
+#        
+#        if result != "__cancelled__":
+#            self.show_picked_image(result)
+#            
+#    def show_picked_image(self, img_path: str):
+#        # Create once
+#        if getattr(self, "picked_image_widget", None) is None:
+#            self.picked_image_widget = Image(
+#                source=img_path,
+#                allow_stretch=True,
+#                keep_ratio=True,
+#                size_hint=(1, None),
+#                height=dp(260),   # tweak as you like
+#            )
+#            # Add it wherever makes sense (root layout / a specific panel)
+#            self.root.current_screen.add_widget(self.picked_image_widget)
+#        else:
+#            self.picked_image_widget.source = img_path
+#
+#        # Force refresh (important on iOS)
+#        self.picked_image_widget.reload()
+
 
 if __name__ == "__main__":
     TreeApp().run()

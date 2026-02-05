@@ -11,6 +11,9 @@ from kivy.clock import Clock
 from kivy.uix.spinner import Spinner
 from kivy.uix.togglebutton import ToggleButton
 from kivy.animation import Animation
+from kivy.app import App
+from kivy.uix.image import Image
+from photos import IOSPhotoPicker
 
 
 import uuid
@@ -19,6 +22,7 @@ SMR_OPTIONS = ["(Select)", "VX", "X", "SX", "SM", "M", "SHG","HG","SHD","HD"]
 SNR_OPTIONS = ["(Select)", "Very Poor", "Poor", "Medium", "Rich", "Very Rich"]
 SITE_FACTORS_OPTIONS = ["(Select)", "Compated morainal material", "Strongly cemented horizon", "Lithic contact","Excessive moisture","Permafrost","Fragmental","Snow Accumulation","Wind","Salt spray", "Frost", "Insolation", "Cold air drainage"]
 SITE_PREP_OPTIONS = ["(Select)", "Spot Burn", "Mechanical & Spot Burn", "Mechanical", "Grass Seeded", "Chemical", "Broadcast Burn"]
+PHOTO_PICKER = IOSPhotoPicker()
 
 
 class LocationPopup(Popup):
@@ -96,6 +100,20 @@ class TrialFormPopup(Popup):
         scroll = ScrollView(size_hint=(1, 1))
         form = BoxLayout(orientation="vertical", spacing=dp(8), size_hint_y=None)
         form.bind(minimum_height=form.setter("height"))
+        
+        # --- Photos ---
+        self.photo_paths = []
+
+        # Preview (for now: show last selected photo, full-res)
+        self.photo_preview = Image(
+            size_hint_y=None,
+            height=dp(220),
+            allow_stretch=True,
+            keep_ratio=True,
+        )
+        #form.add_widget(Label(text="Photos", size_hint_y=None, height=dp(20), halign="left", valign="middle"))
+        form.add_widget(self.photo_preview)
+
 
         def add_field(label, ti):
             form.add_widget(Label(text=label, size_hint_y=None, height=dp(20), halign="left", valign="middle"))
@@ -155,18 +173,61 @@ class TrialFormPopup(Popup):
 
         scroll.add_widget(form)
         root.add_widget(scroll)
-
         btn_row = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(10))
+
+        btn_attach = Button(text="Attach photo")
         btn_cancel = Button(text="Cancel")
         btn_submit = Button(text="Submit")
+
+        btn_attach.bind(on_release=lambda *_: self.open_attach_photo_menu())
         btn_cancel.bind(on_release=lambda *_: self.dismiss())
         btn_submit.bind(on_release=self.submit_form)
+
+        btn_row.add_widget(btn_attach)
         btn_row.add_widget(btn_cancel)
         btn_row.add_widget(btn_submit)
+
         root.add_widget(btn_row)
 
         self.content = root
         
+    def open_attach_photo_menu(self):
+        box = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(12))
+        btns = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(10))
+
+        b_camera = Button(text="Camera")
+        b_library = Button(text="Photo library")
+        btns.add_widget(b_camera)
+        btns.add_widget(b_library)
+        box.add_widget(btns)
+
+        p = Popup(title="Attach photo", content=box, size_hint=(0.9, None), height=dp(180), auto_dismiss=True)
+
+        def pick(source):
+            p.dismiss()
+            self.start_photo_pick(source)
+
+        b_camera.bind(on_release=lambda *_: pick("camera"))
+        b_library.bind(on_release=lambda *_: pick("library"))
+
+        p.open()
+
+    def start_photo_pick(self, source: str):
+        app = App.get_running_app()
+        print("RUNNING APP TYPE:", type(app))
+        print("HAS photo_picker:", hasattr(app, "user_profile"))
+        PHOTO_PICKER.pick(source, on_done=self.on_photo_picked)
+
+    def on_photo_picked(self, path: str | None):
+        if not path:
+            return  # cancelled
+
+        self.photo_paths.append(path)
+
+        # Show last selected image (full-res for now)
+        self.photo_preview.source = path
+        self.photo_preview.reload()
+
 
     def submit_form(self, *_):
         data = {
@@ -183,6 +244,7 @@ class TrialFormPopup(Popup):
             "snr": "" if self.snr.text == "(select)" else self.snr.text,
             "site_factors": "" if self.site_factors.text == "(select)" else self.site_factors.text,
             "site_prep": "" if self.site_prep.text == "(select)" else self.site_prep.text,
+            "photo_paths": list(self.photo_paths)
         }
         self.on_submit(data)
         self.dismiss()
