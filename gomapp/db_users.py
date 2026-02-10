@@ -54,12 +54,17 @@ def init_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS trial_photos (
           photo_id INTEGER PRIMARY KEY AUTOINCREMENT,
-          trial_uuid TEXT,
+          photo_uuid TEXT NOT NULL,
+          trial_uuid TEXT NOT NULL,
           path TEXT NOT NULL,
+          sha256 TEXT,
+          bytes INT,
+          sync_status TEXT,
           created_at TEXT DEFAULT (datetime('now')),
           FOREIGN KEY(trial_uuid) REFERENCES trials(uuid) ON DELETE CASCADE
         )
     """)
+    
     conn.commit()
     conn.close()
 

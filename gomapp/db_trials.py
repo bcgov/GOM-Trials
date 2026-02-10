@@ -5,6 +5,7 @@ import requests
 from datetime import datetime, timezone
 import json
 import uuid
+import os
 
 def upload_trials():
     user = get_active_user()["username"]
@@ -164,4 +165,70 @@ def get_first_photo_for_trial(trial_uuid):
         return row[0] if row else None
     finally:
         conn.close()
+
+##sync photos
+def upload_photos():
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("""
+        SELECT photo_uuid, trial_uuid, path, sha256, bytes
+        FROM trial_photos
+        WHERE sync_status IN ('pending','failed')
+    """).fetchall()
+
+    for row in rows:
+        photo_uuid, trial_uuid, local_path, sha256, bytes_ = row
+
+        # 1. INIT request
+        init_resp = requests.post(
+            f"{API_URL}/photos/init",
+            json={
+                "photo_uuid": photo_uuid,
+                "trial_uuid": trial_uuid,
+                "sha256": sha256,
+                "bytes": bytes_,
+            }
+        ).json()
+        
+        print(init_resp)
+
+        if not init_resp.get("upload_required", True):
+            conn.execute("""
+                UPDATE trial_photos
+                SET sync_status='uploaded'
+                WHERE photo_uuid=?
+            """, (photo_uuid,))
+            continue
+
+        # 2. UPLOAD
+        upload_url = f"{API_URL}/photos/upload/{photo_uuid}"
+        
+        params = {
+            "trial_uuid": trial_uuid,
+            "sha256": sha256,
+            "bytes": bytes_,
+        }
+
+        with open(local_path, "rb") as f:
+            files = {
+                "image": ("image.jpg", f, "image/jpeg")
+            }
+            r = requests.post(upload_url, params=params, files=files)
+
+        print("STATUS:", r.status_code)
+        print("BODY:", r.text)
+        upload_resp = r.json()
+
+        if upload_resp.get("ok"):
+            conn.execute("""
+                UPDATE trial_photos
+                SET sync_status='uploaded'
+                WHERE photo_uuid=?
+            """, (photo_uuid,))
+        else:
+            conn.execute("""
+                UPDATE trial_photos
+                SET sync_status='failed'
+                WHERE photo_uuid=?
+            """, (photo_uuid,))
+    conn.close()
 

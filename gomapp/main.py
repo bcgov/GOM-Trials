@@ -44,13 +44,13 @@ from plyer import gps
 
 from assessment import GrowthCell, GrowthGrid
 from config import DB_PATH, API_URL, USER_RE
-from db_trials import upload_trials, download_trials, update_trial, get_trial_row, get_first_photo_for_trial
+from db_trials import upload_trials, download_trials, update_trial, get_trial_row, get_first_photo_for_trial, upload_photos
 from db_users import init_db, list_users, get_current_user_uuid, set_current_user_uuid, load_current_user_profile, create_user_profile, get_active_user
 from load_mbtiles import SafeMBTilesMapSource, OSMSource, GoogleHybridSource, GoogleTerrainSource
 from load_tif import GeoTiffOverlay
 from popups import LocationPopup, TrialFormPopup, DraggableButton, EditTrialPopup
 from file_picker import pick_files
-#from photos import IOSPhotoPicker
+from photos import compute_sha256
 
 from kivy.properties import BooleanProperty
 from kivy.graphics import Color, Rectangle
@@ -479,7 +479,14 @@ class RootWidget(FloatLayout):
             
         #save photo paths
         for p in data.get("photo_paths", []):
-            c.execute("INSERT INTO trial_photos (trial_uuid, path) VALUES (?, ?)", (data["uuid"], p))
+            photo_uuid = str(uuid.uuid4())
+            sha = compute_sha256(p)
+            bytes_ = os.path.getsize(p)
+
+            conn.execute("""
+                INSERT INTO trial_photos(photo_uuid, trial_uuid, path, sha256, bytes, sync_status)
+                VALUES (?,?,?,?,?,?)
+            """, (photo_uuid, data["uuid"], p, sha, bytes_, "pending"))
 
         conn.commit()
         conn.close()
@@ -588,7 +595,9 @@ class RootWidget(FloatLayout):
         print("🔄 Starting sync...")
         download_trials()
         upload_trials()
+        upload_photos()
         self.load_trials()   # refresh markers
+        
         print("✅ Sync complete")
 
     

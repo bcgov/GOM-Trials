@@ -213,9 +213,6 @@ class TrialFormPopup(Popup):
         p.open()
 
     def start_photo_pick(self, source: str):
-        app = App.get_running_app()
-        print("RUNNING APP TYPE:", type(app))
-        print("HAS photo_picker:", hasattr(app, "user_profile"))
         PHOTO_PICKER.pick(source, on_done=self.on_photo_picked)
 
     def on_photo_picked(self, path: str | None):
