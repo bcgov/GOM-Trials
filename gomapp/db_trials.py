@@ -166,6 +166,49 @@ def get_first_photo_for_trial(trial_uuid):
     finally:
         conn.close()
 
+def get_local_photos(trial_uuids):
+
+    if not trial_uuids:
+        return {}
+
+    # Remove duplicates just in case
+    trial_uuids = list(set(trial_uuids))
+
+    placeholders = ",".join(["?"] * len(trial_uuids))
+
+    query = f"""
+        SELECT photo_uuid, sha256
+        FROM trial_photos
+        WHERE trial_uuid IN ({placeholders})
+    """
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cursor = conn.execute(query, trial_uuids)
+        rows = cursor.fetchall()
+
+        # Build dict
+        result = {
+            row[0]: {"sha256": row[1]}
+            for row in rows
+        }
+
+        return result
+
+    finally:
+        conn.close()
+
+def db_append_photos(uuid, trial, path, sha, bytes_):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+    INSERT INTO trial_photos(photo_uuid, trial_uuid, path, sha256, bytes, sync_status)
+    VALUES (?,?,?,?,?,?)
+                """,
+                (uuid, trial, path, sha, bytes_, "uploaded"))
+    conn.commit()
+    conn.close()
+
+
 ##sync photos
 def upload_photos():
     conn = sqlite3.connect(DB_PATH)
@@ -207,12 +250,16 @@ def upload_photos():
             "sha256": sha256,
             "bytes": bytes_,
         }
-
-        with open(local_path, "rb") as f:
-            files = {
-                "image": ("image.jpg", f, "image/jpeg")
-            }
-            r = requests.post(upload_url, params=params, files=files)
+        
+        try:
+            with open(local_path, "rb") as f:
+                files = {
+                    "image": ("image.jpg", f, "image/jpeg")
+                }
+                r = requests.post(upload_url, params=params, files=files)
+        except:
+            print("Picture no longer exists. Skipping.")
+            continue
 
         print("STATUS:", r.status_code)
         print("BODY:", r.text)

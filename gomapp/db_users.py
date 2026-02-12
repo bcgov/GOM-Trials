@@ -3,6 +3,7 @@ from config import DB_PATH, API_URL
 import datetime
 import json
 import uuid
+import os
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -67,6 +68,38 @@ def init_db():
     
     conn.commit()
     conn.close()
+
+def validate_photo_cache():
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute("""
+            SELECT photo_uuid, path
+            FROM trial_photos
+        """).fetchall()
+
+        missing = []
+
+        for photo_uuid, abs_path in rows:
+            if not os.path.exists(abs_path):
+                missing.append(photo_uuid)
+
+        if missing:
+            placeholders = ",".join(["?"] * len(missing))
+            conn.execute(
+                f"""
+                DELETE FROM trial_photos
+                WHERE photo_uuid IN ({placeholders})
+                """,
+                missing
+            )
+            conn.commit()
+
+            print(f"[PHOTO CACHE] Marked {len(missing)} missing photos for re-download")
+
+    finally:
+        conn.close()
+
+
 
 def list_users():
     conn = sqlite3.connect(DB_PATH)
