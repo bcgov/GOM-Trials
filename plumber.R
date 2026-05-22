@@ -33,6 +33,7 @@ get_field <- function(x, key) {
 
 
 
+
 #* Debug: show what 'image' looks like
 #* @param image:file
 #* @post /debug_upload
@@ -52,6 +53,108 @@ function(image, res) {
   )
 }
 
+#* Get list of usernames in database
+#* @get /usernames
+function(req, res) {
+  con <- pg_connect()
+  on.exit(dbDisconnect(con), add = TRUE)
+  
+  base_query <- "
+    SELECT
+      username, name, email
+    FROM gom_users
+  "
+  data <- dbGetQuery(con, base_query)
+  
+  res$body <- jsonlite::toJSON(data, auto_unbox = TRUE, na = "null")
+  res
+}
+
+#* Create a new user
+#* @post /users
+function(req, res) {
+  con <- pg_connect()
+  on.exit(dbDisconnect(con), add = TRUE)
+  
+  body <- req$postBody
+  if (is.null(body) || !nzchar(body)) {
+    res$status <- 400
+    res$body <- jsonlite::toJSON(list(error = "Missing request body"), auto_unbox = TRUE)
+    return(res)
+  }
+  
+  dat <- tryCatch(
+    jsonlite::fromJSON(body),
+    error = function(e) NULL
+  )
+  
+  if (is.null(dat)) {
+    res$status <- 400
+    res$body <- jsonlite::toJSON(list(error = "Invalid JSON"), auto_unbox = TRUE)
+    return(res)
+  }
+  
+  username <- trimws(dat$username %||% "")
+  name     <- trimws(dat$name %||% "")
+  email    <- trimws(dat$email %||% "")
+  company  <- trimws(dat$company %||% "")
+  
+  if (!nzchar(username)) {
+    res$status <- 400
+    res$body <- jsonlite::toJSON(list(error = "Username is required"), auto_unbox = TRUE)
+    return(res)
+  }
+  
+  if (!nzchar(name)) {
+    res$status <- 400
+    res$body <- jsonlite::toJSON(list(error = "Name is required"), auto_unbox = TRUE)
+    return(res)
+  }
+  
+  # optional: normalize username to lowercase
+  username <- tolower(username)
+  
+  # Check uniqueness first
+  exists_query <- "SELECT 1 FROM gom_users WHERE username = $1 LIMIT 1"
+  exists <- dbGetQuery(con, exists_query, params = list(username))
+  
+  if (nrow(exists) > 0) {
+    res$status <- 409
+    res$body <- jsonlite::toJSON(
+      list(error = "Username already exists"),
+      auto_unbox = TRUE
+    )
+    return(res)
+  }
+  
+  insert_query <- "
+    INSERT INTO gom_users (username, name, email, company, created_at)
+    VALUES ($1, $2, $3, $4, NOW())
+    RETURNING username, name, email, company, created_at
+  "
+  
+  out <- tryCatch(
+    dbGetQuery(
+      con,
+      insert_query,
+      params = list(username, name, email, company)
+    ),
+    error = function(e) e
+  )
+  
+  if (inherits(out, "error")) {
+    res$status <- 500
+    res$body <- jsonlite::toJSON(
+      list(error = paste("Database insert failed:", conditionMessage(out))),
+      auto_unbox = TRUE
+    )
+    return(res)
+  }
+  
+  res$status <- 201
+  res$body <- jsonlite::toJSON(out, auto_unbox = TRUE, na = "null")
+  res
+}
 
 
 #* Upload a JPG image (multipart/form-data)
@@ -99,6 +202,7 @@ function(req, res, since = NULL) {
       uuid,
       lat,
       lon,
+      elev,
       species,
       seedlot,
       seedlings,
@@ -112,7 +216,11 @@ function(req, res, since = NULL) {
       smr,
       snr,
       soil_site_factors,
-      site_prep
+      site_prep,
+      request_key,
+      contact_name AS trial_owner,
+      block_name,
+      replicate_no
     FROM gom_trials
   "
   
@@ -149,13 +257,13 @@ function(req, res) {
         lat, lon,
         species, seedlot, seedlings, spacing,
         timestamp, user_id, growth_grid,
-        site_series, smr, snr, soil_site_factors, site_prep
+        site_series, smr, snr, soil_site_factors, site_prep, request_key,  elev, contact_name, block_name, replicate_no
       )
       VALUES (
         $1,$2,$3,
         $4,$5,$6,NULLIF($7, '')::double precision,
         $8,$9,$10,
-        $11,$12,$13,$14,$15
+        $11,$12,$13,$14,$15,$16,$17,$18,$19,$20
       )
       ON CONFLICT (uuid)
       DO UPDATE SET
@@ -171,8 +279,12 @@ function(req, res) {
         snr          = EXCLUDED.snr,
         soil_site_factors = EXCLUDED.soil_site_factors,
         site_prep    = EXCLUDED.site_prep,
-        timestamp    = EXCLUDED.timestamp
-      WHERE
+        elev         = EXCLUDED.elev,
+        timestamp    = EXCLUDED.timestamp,
+        contact_name = EXCLUDED.contact_name,
+        block_name   = EXCLUDED.block_name,
+        replicate_no   = EXCLUDED.replicate_no
+      WHERE 
         gom_trials.timestamp IS NULL
         OR EXCLUDED.timestamp >= gom_trials.timestamp
     ",
@@ -181,7 +293,7 @@ function(req, res) {
                           t$lat, t$lon,
                           t$species, t$seedlot, t$seedlings, t$spacing,
                           t$timestamp, t$user_id, t$growth_grid,
-                          t$site_series, t$smr, t$snr, t$site_fact, t$site_prep
+                          t$site_series, t$smr, t$snr, t$site_fact, t$site_prep, t$request_key, t$elev, t$trial_owner, t$block_name, t$replicate_no
                         ))
     
     inserted = inserted + 1
@@ -312,9 +424,71 @@ function(req, res) {
     WHERE trial_uuid = ANY(string_to_array($1, ',')::TEXT[])
   ", params = list(trial_uuids))
   
-  static_base <- "http://178.128.233.227/static/"
+  static_base <- "http://178.128.233.227/static/" 
   
   # If file_relpath is like "<trial_uuid>/<photo_uuid>.jpg"
   df$url <- if(nrow(df > 0)) paste0(static_base, df$file_relpath) else character(0)
   df
+}
+
+#* @get /trial_owners
+function(req, res) {
+  con <- pg_connect()
+  on.exit(dbDisconnect(con), add = TRUE)
+  
+  base_query <- "
+    SELECT
+      company_name,
+      contact_name, 
+      contact_email,
+      objective
+    FROM trial_owners
+  "
+  data <- dbGetQuery(con, base_query)
+  res$body <- jsonlite::toJSON(data, auto_unbox = TRUE, na = "null")
+  res
+}
+
+#* Upsert owners from client
+#* @post /trial_owners
+function(req, res) {
+  
+  body <- jsonlite::fromJSON(req$postBody, simplifyVector = TRUE)
+  if (length(body) == 0) return(list(message = "No trials received"))
+  
+  con <- pg_connect()
+  on.exit(dbDisconnect(con), add = TRUE)
+  
+  inserted <- 0
+  # Loop over rows
+  for (i in seq_len(nrow(body))) {
+    t <- body[i, ]
+    
+    result <- dbExecute(con, "
+      INSERT INTO trial_owners (
+        company_name,
+        contact_name,
+        contact_email,
+        objective
+      )
+      VALUES (
+        $1,$2,$3,$4
+      )
+      ON CONFLICT (contact_name)
+      DO UPDATE SET
+        company_name = EXCLUDED.company_name,
+        contact_email = EXCLUDED.contact_email,
+        objective = EXCLUDED.objective
+      ",
+                        params = list(
+                          t$company_name,
+                          t$contact_name,
+                          t$contact_email,
+                          t$objective
+                        ))
+    
+    inserted = inserted + 1
+  }
+  
+  list(inserted = inserted)
 }
