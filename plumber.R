@@ -32,6 +32,28 @@ get_field <- function(x, key) {
 `%||%` <- function(x, y) if (!is.null(x) && length(x) && !is.na(x)) x else y
 
 
+
+#* Debug: show what 'image' looks like
+#* @param image:file
+#* @post /debug_upload
+#* @serializer json
+function(image, res) {
+  list(
+    image_is_null = is.null(image),
+    image_class = paste(class(image), collapse = ", "),
+    image_length = length(image),
+    image_names = if (is.null(image)) NULL else names(image),
+    image_preview = if (is.null(image)) NULL else {
+      # avoid dumping huge content
+      x <- image
+      if (is.raw(x)) paste0("raw[", length(x), "]") else
+        paste0(substr(capture.output(str(x)), 1, 200), collapse = "\n")
+    }
+  )
+}
+
+
+
 #* Upload a JPG image (multipart/form-data)
 #* @param image:file The uploaded image file
 #* @post /upload_old
@@ -221,6 +243,7 @@ function(req, res, photo_uuid, image) {
     return(list(error = "Missing file field 'image'"))
   }
   
+  # In your case: image is a named list; name = filename, value = raw bytes
   filename_in <- names(image)[1] %||% "upload.jpg"
   content <- image[[1]]
   
@@ -265,4 +288,33 @@ function(req, res, photo_uuid, image) {
   )
   
   list(ok=TRUE, file_relpath=relpath, bytes=actual_bytes)
+}
+
+#* @get /photos/list
+#* @serializer json
+function(req, res) {
+  trial_uuids <- req$args$trial_uuids
+  
+  if (is.null(trial_uuids) || nchar(trial_uuids) == 0) {
+    res$status <- 400
+    return(list(error = "trial_uuids is required (comma-separated UUIDs)"))
+  }
+  
+  # Clean whitespace (important if you send "uuid1, uuid2")
+  trial_uuids <- gsub("\\s+", "", trial_uuids)
+  
+  con <- pg_connect()
+  on.exit(dbDisconnect(con), add = TRUE)
+  
+  df <- dbGetQuery(con, "
+    SELECT photo_uuid, trial_uuid, file_relpath, sha256, bytes
+    FROM trial_photos
+    WHERE trial_uuid = ANY(string_to_array($1, ',')::TEXT[])
+  ", params = list(trial_uuids))
+  
+  static_base <- "http://178.128.233.227/static/"
+  
+  # If file_relpath is like "<trial_uuid>/<photo_uuid>.jpg"
+  df$url <- if(nrow(df > 0)) paste0(static_base, df$file_relpath) else character(0)
+  df
 }
