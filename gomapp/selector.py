@@ -1,6 +1,6 @@
 from kivy.uix.widget import Widget
 from kivy.properties import ObjectProperty, BooleanProperty
-from kivy.graphics import Color, Line
+from kivy.graphics import Color, Line, Rectangle
 
 class RectSelectOverlay(Widget):
     """
@@ -16,22 +16,34 @@ class RectSelectOverlay(Widget):
         self._p0 = None  # start (x,y) in mapview-local coords
         self._p1 = None  # end   (x,y) in mapview-local coords
         self._rect_line = None
+        self._rect_fill = None
         self.mapview = mapview
 
     def _clear_graphics(self):
         if self._rect_line is None:
             return
         self.canvas.after.remove(self._rect_line)
+        self.canvas.after.remove(self._rect_fill)
         self._rect_line = None
+        self._rect_fill = None
+
 
     def _draw_rect(self, x0, y0, x1, y1):
         # Keep it as a polyline rectangle
         left, right = sorted([x0, x1])
         bottom, top = sorted([y0, y1])
-
+        
+        width = right - left
+        height = top - bottom
+        
         self._clear_graphics()
         with self.canvas.after:
-            Color(1, 1, 1, 0.9)  # border
+            Color(0.2,0,0.2, 0.25)  # border
+            self._rect_fill = Rectangle(
+                pos=(left, bottom),
+                size=(width, height),
+            )
+            Color(0, 0, 0, 1)  # solid black
             self._rect_line = Line(
                 points=[left, bottom, right, bottom, right, top, left, top, left, bottom],
                 width=1.5,

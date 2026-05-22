@@ -1,11 +1,17 @@
+from unittest import case
+
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.dropdown import DropDown
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.popup import Popup
-from kivy_garden.mapview import MapView, MapMarker, MapMarkerPopup
-from kivy_garden.mapview.downloader import Downloader
+import kivy_garden.mapview.constants as mv_constants
+from kivy_garden.mapview import MapView, MapMarker, MapMarkerPopup, MapSource
+from pathlib import Path
+import os
+import sys
+
 from kivy.uix.textinput import TextInput
 from kivy.uix.label import Label
 from kivy.uix.button import Button
@@ -26,14 +32,15 @@ from kivy.animation import Animation
 from kivy.core.text import LabelBase
 from kivy.uix.modalview import ModalView
 from kivy.uix.spinner import Spinner
+from kivy.uix.carousel import Carousel
+
 from pyobjus import autoclass, objc_str
 from pyobjus.dylib_manager import load_framework
 
 from threading import Thread
 import time
 import re
-import os
-import sys
+
 import sqlite3
 import requests
 import datetime
@@ -41,21 +48,30 @@ import json
 import uuid
 import os.path
 from plyer import gps
+import sys
+
 
 from assessment import GrowthCell, GrowthGrid
-from config import DB_PATH, API_URL, USER_RE
-from db_trials import upload_trials, download_trials, update_trial, get_trial_row, get_first_photo_for_trial, upload_photos
-from db_users import init_db, validate_photo_cache, list_users, get_current_user_uuid, set_current_user_uuid, load_current_user_profile, create_user_profile, get_active_user
-from load_mbtiles import SafeMBTilesMapSource, OSMSource, GoogleHybridSource, GoogleTerrainSource
-from load_tif import GeoTiffOverlay
+from config import DB_PATH, API_URL, USER_RE, icon_dict
+from db_trials import upload_trials, download_trials, update_trial, get_trial_row, get_photos_for_trial, upload_photos
+from db_users import upload_trial_owners, download_trial_owners, init_db, validate_photo_cache, list_users, get_current_user_uuid, set_current_user_uuid, load_current_user_profile, create_user_profile, get_active_user, fetch_users, create_user
+from load_mbtiles import SafeMBTilesMapSource, OSMSource, GoogleHybridSource, GoogleTerrainSource, BGCSource
+# from load_tif import GeoTiffOverlay
 from popups import LocationPopup, TrialFormPopup, DraggableButton, EditTrialPopup
 from file_picker import pick_files
 from photos import compute_sha256, photos_needed, download_photos
 from selector import RectSelectOverlay
+from gom_logger import logger
 
 from kivy.properties import BooleanProperty
 from kivy.graphics import Color, Rectangle
 from kivy.uix.image import Image
+from kivy.uix.behaviors import ButtonBehavior
+
+
+class ImageButton(ButtonBehavior, Image):
+    pass
+
     
 class Scrim(Widget):
     active = BooleanProperty(False)
@@ -114,33 +130,54 @@ class LoginScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
+        self.users = []
+
         root = BoxLayout(orientation="vertical", padding=dp(20), spacing=dp(12))
         scroll = ScrollView(do_scroll_x=False)
         form = BoxLayout(orientation="vertical", spacing=dp(14), size_hint_y=None)
         form.bind(minimum_height=form.setter("height"))
 
-        # Spacer to push content away from bottom/top when there is space
         form.add_widget(Widget(size_hint_y=None, height=dp(40)))
 
-        form.add_widget(Label(
+        title = Label(
             text="Welcome to GOM!",
             font_size="24sp",
             size_hint_y=None,
             height=dp(34),
             halign="center",
             valign="middle"
-        ))
-        form.children[0].bind(size=lambda inst, _: setattr(inst, "text_size", inst.size))
+        )
+        title.bind(size=lambda inst, _: setattr(inst, "text_size", inst.size))
+        form.add_widget(title)
 
-        form.add_widget(Label(
-            text="Enter your details (saved on this device).",
+        subtitle = Label(
+            text="Select a user or create a new profile.",
             size_hint_y=None,
             height=dp(28),
             halign="center",
             valign="middle"
-        ))
-        form.children[0].bind(size=lambda inst, _: setattr(inst, "text_size", inst.size))
+        )
+        subtitle.bind(size=lambda inst, _: setattr(inst, "text_size", inst.size))
+        form.add_widget(subtitle)
 
+        # 🔽 Existing user dropdown
+        self.user_spinner = Spinner(
+            text="Select existing user",
+            size_hint_y=None,
+            height=dp(48)
+        )
+        self.user_spinner.bind(text=self.on_user_selected)
+        form.add_widget(self.user_spinner)
+
+        # Divider label
+        form.add_widget(Label(
+            text="— or create new —",
+            size_hint_y=None,
+            height=dp(24),
+            halign="center"
+        ))
+
+        # Existing inputs (unchanged)
         self.name_in = TextInput(hint_text="Full name", multiline=False, size_hint_y=None, height=dp(48))
         self.email_in = TextInput(hint_text="Email (Optional)", multiline=False, size_hint_y=None, height=dp(48))
         self.user_in = TextInput(hint_text="Username (letters/numbers/_)", multiline=False, size_hint_y=None, height=dp(48))
@@ -156,31 +193,133 @@ class LoginScreen(Screen):
         btn.bind(on_release=self.on_continue)
         form.add_widget(btn)
 
-        # Bottom spacer so it doesn't feel cramped
         form.add_widget(Widget(size_hint_y=None, height=dp(60)))
 
         scroll.add_widget(form)
         root.add_widget(scroll)
         self.add_widget(root)
 
+        # 🔄 Load users after UI builds
+        Clock.schedule_once(lambda dt: self.load_users())
+        
+    def on_pre_enter(self, *args):
+        # Reset spinner
+        self.user_spinner.text = "Select existing user"
+
+        # Clear form fields
+        self.name_in.text = ""
+        self.email_in.text = ""
+        self.user_in.text = ""
+
+        # Clear errors
+        self.err.text = ""
+
+        # Optional: refresh user list from server
+        # self.load_users()
+        
+    def on_user_selected(self, spinner, text):
+
+        # Ignore placeholder value
+        if text == "Select existing user":
+            return
+
+        # Find matching user
+        user = next(
+            (u for u in self.users if u["username"] == text),
+            None
+        )
+
+        if not user:
+            return
+
+        # Autofill fields
+        self.user_in.text = user.get("username", "")
+        self.name_in.text = user.get("name", "")
+        self.email_in.text = user.get("email", "") or ""
+
+        # Clear previous errors
+        self.err.text = ""
+
+    def load_users(self):
+        try:
+
+            self.users = fetch_users()
+            usernames = [u["username"] for u in self.users]
+            usernames.sort()
+            self.user_spinner.values = usernames
+
+        except Exception as e:
+            print("Failed to fetch users:", e)
+            self.users = []
+            self.err.text = "Could not load users (offline mode)"
+            
     def on_continue(self, *_):
+        app = App.get_running_app()
+
+        selected_username = self.user_spinner.text
+
+        # ✅ CASE 1: Existing user selected
+        if selected_username != "Select existing user":
+            user = next(u for u in self.users if u["username"] == selected_username)
+
+            profile = create_user_profile(
+                user.get("name", user["username"]),
+                user.get("email", ""),
+                user["username"]
+            )
+
+            app.user_profile = profile
+            TreeApp.instance.get_root_widget().on_user_switched() ##redraw for new user
+            self.manager.current = "map"
+            return
+
+        # ✅ CASE 2: Create new user
         name = self.name_in.text.strip()
-        email = self.email_in.text.strip()
-        username = self.user_in.text.strip()
+        email = self.email_in.text.strip() if self.email_in.text.strip() else ""
+        username = self.user_in.text.strip().lower()
 
         if len(name) < 2:
             self.err.text = "Please enter your name."
             return
+
         if not USER_RE.match(username):
             self.err.text = "Username must be 3–32 chars: letters/numbers/_"
             return
 
-        app = App.get_running_app()
+        # 🔒 Check uniqueness
+        existing = {u["username"] for u in self.users}
+        if username in existing:
+            self.err.text = "Username already exists. Please choose another."
+            return
+
+
+        user = {
+            "username": username,
+            "name": name,
+            "email": email,
+            "company": ""  # optional for now
+        }
+
+        try:
+            new_user = create_user(user)[0]
+        except Exception as e:
+            self.err.text = f"User not synced; offline"
+            new_user = username  # fallback to local profile only
+
+        # update local list
+        self.users.append(new_user)
+        self.user_spinner.values = [u["username"] for u in self.users]
+
         profile = create_user_profile(name, email, username)
         app.user_profile = profile
 
         self.err.text = ""
+        TreeApp.instance.get_root_widget().on_user_switched() ##redraw for new user
         self.manager.current = "map"
+
+
+
+
     
 class RootWidget(FloatLayout):
     def __init__(self, **kwargs):
@@ -190,8 +329,26 @@ class RootWidget(FloatLayout):
         self.marker = None
         self.trial_markers = []     # list of marker widgets
         self.trial_marker_uuids = set()   # fast duplicate check
-        
-        self.mapview = MapView(zoom=11, lat=49.0, lon=-123.0)
+
+        app = App.get_running_app()
+        self.cache_dir = Path(app.user_data_dir) / "tile_cache"
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        source = MapSource(
+            min_zoom=0,
+            max_zoom=19,
+            url="https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+            attribution="OpenStreetMap",
+            cache_dir=str(self.cache_dir)
+        )
+
+        self.mapview = MapView(
+            map_source=source,
+            cache_dir=str(self.cache_dir),
+            lat=48.8,
+            lon=-123.5,
+            zoom=10
+        )
         self.default_source = self.mapview.map_source
         self.mbtiles_source = None
         
@@ -207,6 +364,20 @@ class RootWidget(FloatLayout):
         # --- Scrim (tap to close) ---
         self.scrim = Scrim(on_tap=self.close_drawer, size_hint=(1, 1))
         self.add_widget(self.scrim)
+
+        gps_btn = ImageButton(
+            source="gps_arrow.png",
+            size_hint=(None, None),
+            size=(dp(56), dp(56)),
+            allow_stretch=True
+        )
+        gps_btn.pos_hint = {
+            "right": 0.98,
+            "y": 0.02
+        }
+
+        gps_btn.bind(on_release=self.center_on_user)
+        self.add_widget(gps_btn)
 
         # --- Drawer (starts off-screen to the left) ---
         self.drawer = BoxLayout(
@@ -256,11 +427,17 @@ class RootWidget(FloatLayout):
         add_menu_item("Record Trial", self.record_new_trial)
         add_menu_item("Sync with Server", self.sync_with_server)
         add_menu_item("Change user", self.change_user_popup)
-        add_menu_item("Select Trials to Cache", self.region_select)
+        add_menu_item("Select Photos to Cache", self.region_select)
+        #add_menu_item("Filter Trials", self.filter_trials_popup)
 
         #add_menu_item("Upload MBTiles", self.pick_mbtiles)
         #add_menu_item("Remove GeoTIFF", self.remove_geotiff)
         #add_menu_item("Remove MBTiles", self.remove_mbtiles)
+
+        # def open_filter_popup(self, instance):
+        #     species = set(m.trial_data["species"] for m in self.trial_markers)
+        #     species_dropdown = Spinner()
+
         
         self.map_style_spinner = Spinner(
             text="Map Type",
@@ -268,6 +445,7 @@ class RootWidget(FloatLayout):
                 "OpenStreetMap",
                 "Google Hybrid",
                 "Google Terrain",
+                "BGC Map",
                 "Custom MBTiles",
             ],
             size_hint=(1, None),
@@ -280,7 +458,7 @@ class RootWidget(FloatLayout):
         # Spacer to push things up
         self.drawer.add_widget(Widget())
         self.btn_open = Button(
-            text="...",
+            text="MENU",
             size_hint=(None, None),
             size=(dp(50), dp(50)),
             pos_hint={"x": 0.02, "top": 0.98},
@@ -296,17 +474,35 @@ class RootWidget(FloatLayout):
         print(f"🌍 Switching to map style: {value}")
 
         if value == "OpenStreetMap":
-            self.mapview.map_source = OSMSource()
+            self.mapview.map_source = OSMSource(cache_dir=str(self.cache_dir))
 
         elif value == "Google Hybrid":
-            self.mapview.map_source = GoogleHybridSource()
+            self.mapview.map_source = GoogleHybridSource(cache_dir=str(self.cache_dir))
 
         elif value == "Google Terrain":
-            self.mapview.map_source = GoogleTerrainSource()
-
+            self.mapview.map_source = GoogleTerrainSource(cache_dir=str(self.cache_dir))
+        elif value == "BGC Map":
+            self.mapview.map_source = BGCSource(cache_dir=str(self.cache_dir), image_ext="webp")
         elif value == "Custom MBTiles":
-            
             self.pick_mbtiles()
+
+    def center_on_user(self, *_):
+        # Ensure GPS fix exists
+        if self.lat is None or self.lon is None:
+            logger.warning("No GPS fix available")
+            return
+
+        # Optional: ensure reasonable zoom level
+        target_zoom = 16
+
+        if self.mapview.zoom < target_zoom:
+            self.mapview.zoom = target_zoom
+
+        # Center map
+        self.mapview.center_on(self.lat, self.lon)
+
+        logger.info(f"Centered map on user: {self.lat}, {self.lon}")
+        
 
     def handle_bbox(self, bbox):
         lat_min, lon_min, lat_max, lon_max = bbox
@@ -350,17 +546,20 @@ class RootWidget(FloatLayout):
             self.active_user_lbl.text = "Active User: (error)"
         
     @mainthread
-    def set_marker(self, lat, lon):
-        self.lat, self.lon = lat, lon
+    def set_marker(self, lat, lon, elev):
+        self.lat, self.lon, self.elev = lat, lon, elev
         # 2) Create/update marker
         if self.marker is None:
-            self.marker = MapMarker(lat=lat, lon=lon)
+            self.marker = MapMarker(lat=lat, lon=lon, source="Position_icon32.png")
             self.mapview.add_marker(self.marker)
             self.mapview.center_on(lat, lon)
         else:
-            self.marker.lat, self.marker.lon = lat, lon
+            self.mapview.remove_marker(self.marker)
+            self.marker = MapMarker(lat=lat, lon=lon, source="Position_icon32.png")
+            self.mapview.add_marker(self.marker)
             
     def region_select(self, instance = None):
+        self.close_drawer()
         ov = self.overlay  # Or wherever it is attached
         ov.enabled = not ov.enabled
             
@@ -420,15 +619,15 @@ class RootWidget(FloatLayout):
         popup.open()
 
 #
-    def remove_geotiff(self, instance=None):
-        """Remove the GeoTIFF overlay from the map if it exists."""
-        try:
-            if self.geotiff_overlay.parent:
-                self.geotiff_overlay.parent.remove_widget(self.geotiff_overlay)
-            self.geotiff_overlay = None
-            print("✅ GeoTIFF overlay removed.")
-        except Exception as e:
-            print(f"⚠️ Error removing overlay: {e}")
+    # def remove_geotiff(self, instance=None):
+    #     """Remove the GeoTIFF overlay from the map if it exists."""
+    #     try:
+    #         if self.geotiff_overlay.parent:
+    #             self.geotiff_overlay.parent.remove_widget(self.geotiff_overlay)
+    #         self.geotiff_overlay = None
+    #         print("✅ GeoTIFF overlay removed.")
+    #     except Exception as e:
+    #         print(f"⚠️ Error removing overlay: {e}")
 
     def remove_mbtiles(self, instance=None):
         self.mapview.map_source = self.default_source
@@ -458,31 +657,31 @@ class RootWidget(FloatLayout):
         except Exception as e:
             print(f"❌ Error loading MBTiles: {e}")
 
-    def pick_geotiff(self, *_):
-        pick_files(exts=(".tif", ".tiff"), callback=self._on_tif_picked, subdir="geotiff")
+    # def pick_geotiff(self, *_):
+    #     pick_files(exts=(".tif", ".tiff"), callback=self._on_tif_picked, subdir="geotiff")
 
-    def _on_tif_picked(self, selection):
-        if not selection:
-            return
-        path = selection[0]
-        # Use your existing GeoTIFF loader / overlay
-        overlay = GeoTiffOverlay(path, self.mapview)
-        self.mapview.add_widget(overlay)
-        self.geotiff_overlay = overlay
+    # def _on_tif_picked(self, selection):
+    #     if not selection:
+    #         return
+    #     path = selection[0]
+    #     # Use your existing GeoTIFF loader / overlay
+    #     overlay = GeoTiffOverlay(path, self.mapview)
+    #     self.mapview.add_widget(overlay)
+    #     self.geotiff_overlay = overlay
         
     def record_new_trial(self, instance):
         if self.lat is None or self.lon is None:
             print("⚠️ No GPS fix yet.")
             return
             
-        popup = LocationPopup(self.lat, self.lon, self.create_trial_at)
+        popup = LocationPopup(self.lat, self.lon, self.elev, self.create_trial_at)
         popup.open()
 
-    def create_trial_at(self, lat, lon):
-        print(f"Recording trial at {lat}, {lon}")
+    def create_trial_at(self, lat, lon, elev, owner, block_name):
+        print(f"Recording trial at {lat}, {lon} (elev: {elev}), owner: {owner}, block: {block_name}")
 
         # Open form popup
-        popup = TrialFormPopup(lat, lon, self.save_trial)
+        popup = TrialFormPopup(lat, lon, elev, owner, block_name, self.save_trial)
         popup.open()
         
     def save_trial(self, data):
@@ -492,11 +691,11 @@ class RootWidget(FloatLayout):
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("""
-            INSERT INTO trials (uuid, species, seedlings, seedlot, spacing, lat, lon, user_id, site_series, smr, snr, site_fact, site_prep)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO trials (uuid, species, seedlings, seedlot, spacing, request_key, lat, lon, trial_owner, elev, user_id, site_series, smr, snr, site_fact, site_prep, notes, block_name, replicate_no)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (data["uuid"], data["species"], data["seedlings"], data["seedlot"],
-              data["spacing"], data["lat"], data["lon"], get_active_user()["username"], data["site_series"], data["smr"], data["snr"], data["site_factors"], data["site_prep"]))
-            
+              data["spacing"], data["request_key"], data["lat"], data["lon"], data["owner"], data["elev"], get_active_user()["username"], data["site_series"], data["smr"], data["snr"], data["site_factors"], data["site_prep"], data["notes"], data["block_name"], data["replicate_no"]))
+
         #save photo paths
         for p in data.get("photo_paths", []):
             photo_uuid = str(uuid.uuid4())
@@ -510,7 +709,7 @@ class RootWidget(FloatLayout):
 
         conn.commit()
         conn.close()
-        print("✅ Trial saved.")
+        logger.info("✅ Trial saved.")
         
         self.add_trial_marker(
             uuid=data["uuid"],
@@ -522,18 +721,19 @@ class RootWidget(FloatLayout):
             spacing=data["spacing"],
             lat=data["lat"],
             lon=data["lon"],
+            year=datetime.datetime.now().strftime("%Y")
         )
         
         
     def clear_all_trial_markers(self):
-        print("🧹 Clearing all trial markers")
+        logger.info("🧹 Clearing all trial markers")
 
         # Remove markers from the map
         for m in self.trial_markers:
             try:
                 self.mapview.remove_widget(m)
             except Exception as e:
-                print("⚠️ Error removing marker:", e)
+                logger.warning("⚠️ Error removing marker:", e)
 
         # Reset tracking
         self.trial_markers.clear()
@@ -544,17 +744,17 @@ class RootWidget(FloatLayout):
         try:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
-            c.execute("SELECT uuid, user_id, id, species, seedlings, seedlot, spacing, lat, lon FROM trials")
+            c.execute("SELECT uuid, user_id, id, species, seedlings, seedlot, spacing, lat, lon, strftime('%Y-%m', timestamp) AS year FROM trials")
             rows = c.fetchall()
             conn.close()
 
-            print(f"📥 Background loaded {len(rows)} trials")
+            logger.info(f"📥 Background loaded {len(rows)} trials")
 
             # schedule adding them gradually
             Clock.schedule_once(lambda dt: self._add_trial_markers_generator(rows))
         except Exception as e:
-            print(f"⚠️ Background trial load error: {e}")
-            
+            logger.warning(f"⚠️ Background trial load error: {e}")
+
     def _add_trial_markers_generator(self, rows, batch_size=50):
         """
         Add markers in small batches so UI stays responsive.
@@ -567,9 +767,9 @@ class RootWidget(FloatLayout):
             end = min(idx + batch_size, total)
 
             for i in range(idx, end):
-                uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon = rows[i]
+                uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon, year = rows[i]
                 if uuid not in self.trial_marker_uuids:
-                    self.add_trial_marker(uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon)
+                    self.add_trial_marker(uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon, year)
 
             idx = end
             #print(f"📍 Added {end} / {total}")
@@ -578,13 +778,13 @@ class RootWidget(FloatLayout):
                 # schedule next batch
                 Clock.schedule_once(add_next_batch, 0)
             else:
-                print("✅ All markers added")
+                logger.info("✅ All markers added")
 
         Clock.schedule_once(add_next_batch, 0)
 
 
     def on_user_switched(self):
-        print("🧹 Clearing all trial markers")
+        logger.info("🧹 Clearing all trial markers")
         self.clear_all_trial_markers()
 
         # Load all rows in background
@@ -596,35 +796,40 @@ class RootWidget(FloatLayout):
         try:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
-            c.execute("SELECT uuid, user_id, id, species, seedlings, seedlot, spacing, lat, lon FROM trials")
+            c.execute("SELECT uuid, user_id, id, species, seedlings, seedlot, spacing, lat, lon, strftime('%Y-%m', timestamp) AS year FROM trials")
             rows = c.fetchall()
             conn.close()
 
-            print(f"📍 Loaded {len(rows)} trials from DB")
+            logger.info(f"📍 Loaded {len(rows)} trials from DB")
 
             for row in rows:
-                uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon = row
+                uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon, year = row
                 if uuid not in self.trial_marker_uuids:
-                    self.add_trial_marker(uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon)
+                    self.add_trial_marker(uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon, year)
                     
 
         except Exception as e:
-            print(f"⚠️ Error loading trials: {e}")
+            logger.warning(f"⚠️ Error loading trials: {e}")
             
     def sync_with_server(self, instance):
-        print("🔄 Starting sync...")
+        logger.info("🔄 Starting sync...")
         download_trials()
         upload_trials()
-        upload_photos()
+        logger.info("✅ Trials synced.")
         self.load_trials()   # refresh markers
-        
-        print("✅ Sync complete")
+        download_trial_owners()
+        upload_trial_owners()
+        upload_photos()
+        logger.info("✅ Sync complete")
 
     
-    def add_trial_marker(self, uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon):
+    def add_trial_marker(self, uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon, year):
         """Create a lightweight marker which builds its popup only on tap."""
         is_mine = (get_active_user()["username"] == user_id)
-        icon = "user_icon.png" if is_mine else "gps_purple.png"
+        #icon = "user_icon.png" if is_mine else "gps_purple.png"
+        icon = icon_dict.get(species.lower(), "GoM_glass.png")
+        # icon = "Fd_icon16.png" if species.lower() in ['fd','fdi','fdc'] else "user_icon.png"
+
 
         marker = MapMarkerPopup(lat=lat, lon=lon, source=icon)
         marker.uuid = uuid
@@ -640,6 +845,7 @@ class RootWidget(FloatLayout):
             "spacing": spacing,
             "lat": lat,
             "lon": lon,
+            "year": year
         }
 
         # Build popup lazily on tap
@@ -666,23 +872,12 @@ class RootWidget(FloatLayout):
         # Main container with explicit size
         box = BoxLayout(
             orientation="vertical",
-            spacing=4,
-            padding=5,
-            size_hint=(None, None),
-            width=600,
-            height=600,
+            spacing=dp(8),
+            padding=dp(10),
+            size_hint_y=None
         )
 
-        # --- Background rectangle (shared texture, no per-marker memory bloat) ---
-        with box.canvas.before:
-            Color(0, 0, 0, 0.7)  # translucent black
-            bg = Rectangle(pos=box.pos, size=box.size)
-
-        def _update_bg(*_):
-            bg.pos = box.pos
-            bg.size = box.size
-
-        box.bind(pos=_update_bg, size=_update_bg)
+        box.bind(minimum_height=box.setter("height"))
 
         # --- Info text ---
         info_text = (
@@ -691,6 +886,7 @@ class RootWidget(FloatLayout):
             f"[b]Seedlings:[/b] {d['seedlings']}\n"
             f"[b]Seedlot:[/b] {d['seedlot']}\n"
             f"[b]Spacing:[/b] {d['spacing']}\n"
+            f"[b]Year:[/b] {d['year']}\n"
         )
 
         info_label = Label(
@@ -705,38 +901,25 @@ class RootWidget(FloatLayout):
         )
         box.add_widget(info_label)
         
-        photo_path = get_first_photo_for_trial(marker.uuid)
-        if photo_path:
+        photo_paths = get_photos_for_trial(marker.uuid) ##make sure it returns None
+        if photo_paths:
             view_btn = Button(
                 text="View Photo",
                 size_hint_y=None,
-                height=64,
+                height=dp(80),
                 background_normal="",
                 background_color=(0.2, 0.8, 0, 0.9),
             )
             view_btn.bind(
-                on_release=lambda *_: self.open_photo_popup(photo_path)
+                on_release=lambda *_: self.open_photo_carousel_popup(photo_paths)
             )
             box.add_widget(view_btn)
-
-        # --- Delete button ---
-        delete_btn = Button(
-            text="Delete",
-            size_hint_y=None,
-            height=64,
-            background_normal="",
-            background_color=(0.8, 0.2, 0.2, 0.9),
-        )
-        delete_btn.bind(
-            on_release=lambda *_: (popup.dismiss(), self.delete_trial(marker))
-        )
-        box.add_widget(delete_btn)
 
         # --- Edit Trial ---
         edit_btn = Button(
             text="Edit Trial",
             size_hint_y=None,
-            height=64,
+            height=dp(80),
             background_normal="",
             background_color=(0.2, 0.4, 0.9, 0.9),
         )
@@ -745,29 +928,101 @@ class RootWidget(FloatLayout):
         )
         box.add_widget(edit_btn)
 
-        # --- Assessment ---
-        growth_button = Button(
-            text="Add Assessment",
+        # add some spacing before delete button
+        box.add_widget(Widget(size_hint_y=None, height=dp(20)))
+
+        # --- Delete button ---
+        delete_btn = Button(
+            text="Delete",
             size_hint_y=None,
-            height=80,
+            height=dp(80),
             background_normal="",
-            background_color=(0.8, 0.1, 0.8, 0.9),
+            background_color=(0.8, 0.2, 0.2, 0.9),
         )
-        growth_button.bind(
-            on_release=lambda *_: (popup.dismiss(), self.open_growth_popup(marker))
+        delete_btn.bind(
+            on_release=lambda *_: (self.confirm_delete_trial(marker, popup)) #, popup.dismiss(), self.delete_trial(marker)
         )
-        box.add_widget(growth_button)
+        box.add_widget(delete_btn)
+
+        
+
+        # --- Assessment ---
+        # growth_button = Button(
+        #     text="Add Assessment",
+        #     size_hint_y=None,
+        #     height=80,
+        #     background_normal="",
+        #     background_color=(0.8, 0.1, 0.8, 0.9),
+        # )
+        # growth_button.bind(
+        #     on_release=lambda *_: (popup.dismiss(), self.open_growth_popup(marker))
+        # )
+        # box.add_widget(growth_button)
+
+        scroll = ScrollView(do_scroll_x=False)
+        scroll.add_widget(box)
+
 
         # --- Popup wrapper ---
         popup = Popup(
-            title=" ",
-            content=box,
-            size_hint=(None, None),
-            size=(660, 660),     # slightly larger container so 600px fits comfortably
-            auto_dismiss=True,
+            title="Trial Details",
+            content=scroll,
+            size_hint=(0.7, 0.7)
         )
 
         popup.open()
+        
+    def confirm_delete_trial(self, marker, parent_popup):
+            confirm_box = BoxLayout(orientation="vertical", spacing=10, padding=10)
+            confirm_box.add_widget(Label(text="Are you sure you want \n to delete this trial?", size_hint_y=None, height=dp(60)))
+            btn_row = BoxLayout(size_hint_y=None, height=dp(60), spacing=dp(10))
+            yes_btn = Button(text="Yes, delete", background_normal="", background_color=(0.8, 0.2, 0.2, 0.9))
+            no_btn = Button(text="No, keep it", background_normal="", background_color=(0.2, 0.8, 0.2, 0.9))
+            btn_row.add_widget(yes_btn)
+            btn_row.add_widget(no_btn)
+            confirm_box.add_widget(btn_row)
+
+            parent_popup.content = confirm_box
+
+            yes_btn.bind(on_release=lambda *_: (parent_popup.dismiss(), self.delete_trial(marker)))
+            no_btn.bind(on_release=lambda *_: parent_popup.dismiss())
+    
+    def open_photo_carousel_popup(self, photo_paths, title="Photos"):
+
+        carousel = Carousel(direction="right", loop=True)
+
+        # Optional counter label
+        counter = Label(size_hint_y=None, height=dp(28), text=f"1 / {len(photo_paths)}")
+
+        def update_counter(*_):
+            counter.text = f"{carousel.index + 1} / {len(photo_paths)}"
+
+        carousel.bind(index=update_counter)
+
+        for p in photo_paths:
+            # Async image loading + allow stretching
+            img = Image(
+                source=p,
+                allow_stretch=True,
+                keep_ratio=True
+            )
+            carousel.add_widget(img)
+
+        root = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
+        root.add_widget(counter)
+        root.add_widget(carousel)
+
+        Popup(
+            title=title,
+            content=root,
+            size_hint=(None, None),
+            size=(dp(700), dp(600)),
+            auto_dismiss=True,
+        ).open()
+
+        # ensure counter initializes after popup opens
+        Clock.schedule_once(lambda *_: update_counter(), 0)
+
         
     def open_photo_popup(self, path):
         # Full-size image widget
@@ -912,13 +1167,17 @@ class TreeApp(App):
 
         # Route based on whether profile exists
         prof = load_current_user_profile()
-        if prof:
+        if prof: #prof
             self.user_profile = prof
             sm.current = "map"
         else:
             sm.current = "login"
 
-        return sm  # Kivy assigns this to self.root
+        return sm
+        
+    def on_user_switched(self):
+        print("Changed user!")
+        self.root.on_user_switched()
         
     def on_start(self):
         # Wait until root is built before starting GPS
@@ -949,7 +1208,8 @@ class TreeApp(App):
 
     @mainthread
     def on_location(self, **kwargs):
-        lat, lon = kwargs.get("lat"), kwargs.get("lon")
+        lat, lon, elev = kwargs.get("lat"), kwargs.get("lon"), kwargs.get("altitude")
+        # print(f"📍 GPS update: {lat}, {lon}, elev={elev}")
 
         # If we're not on the map screen yet (user still on login), ignore GPS updates
         if not self.root or self.root.current != "map":
@@ -957,7 +1217,7 @@ class TreeApp(App):
 
         try:
             rw = self.get_root_widget()
-            Clock.schedule_once(lambda dt: rw.set_marker(lat, lon))
+            Clock.schedule_once(lambda dt: rw.set_marker(lat, lon, elev))
         except Exception as e:
             print("⚠️ Could not set marker:", e)
         
