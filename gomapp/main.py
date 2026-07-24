@@ -68,6 +68,8 @@ from kivy.graphics import Color, Rectangle
 from kivy.uix.image import Image
 from kivy.uix.behaviors import ButtonBehavior
 
+MAX_GPS_AGE = 5          # seconds
+MAX_GPS_ACCURACY = 20    # metres
 
 class ImageButton(ButtonBehavior, Image):
     pass
@@ -329,6 +331,7 @@ class RootWidget(FloatLayout):
         self.marker = None
         self.trial_markers = []     # list of marker widgets
         self.trial_marker_uuids = set()   # fast duplicate check
+        self.gps_fix = None
 
         app = App.get_running_app()
         self.cache_dir = Path(app.user_data_dir) / "tile_cache"
@@ -347,7 +350,8 @@ class RootWidget(FloatLayout):
             cache_dir=str(self.cache_dir),
             lat=48.8,
             lon=-123.5,
-            zoom=10
+            zoom=10,
+            snap_to_zoom=False,
         )
         self.default_source = self.mapview.map_source
         self.mbtiles_source = None
@@ -424,6 +428,17 @@ class RootWidget(FloatLayout):
             self.drawer.add_widget(b)
 
         #add_menu_item("Upload GeoTIFF", self.pick_geotiff)
+        self.gps_label = Label(
+            text="GPS: No fix",
+            size_hint=(1, None),
+            height=dp(28),
+            halign="left",
+            valign="middle",
+            markup=True
+        )
+        self.drawer.add_widget(self.gps_label)
+        self.start_gps_status_updates()
+
         add_menu_item("Record Trial", self.record_new_trial)
         add_menu_item("Sync with Server", self.sync_with_server)
         add_menu_item("Change user", self.change_user_popup)
@@ -469,7 +484,37 @@ class RootWidget(FloatLayout):
         
         self.safe_zone = BottomSafeZone(size_hint=(1, None), height=dp(28), pos_hint={"x": 0, "y": 0})
         self.add_widget(self.safe_zone)
-        
+
+
+    def start_gps_status_updates(self):
+        Clock.schedule_interval(self.update_gps_status_label, 1.0)
+
+    def update_gps_status_label(self, dt):
+        if self.gps_fix is None:
+            self.gps_label.text = (
+                "[color=ff4444]GPS: No fix[/color]"
+            )
+            return
+
+        age = time.monotonic() - self.gps_fix["timestamp"]
+        acc = self.gps_fix["accuracy"]
+
+        if age > MAX_GPS_AGE:
+            colour = "ff4444"
+            status = "Stale"
+        elif acc is None or acc > MAX_GPS_ACCURACY:
+            colour = "ffaa00"
+            status = "Poor"
+        else:
+            colour = "44cc44"
+            status = "OK"
+
+        self.gps_label.text = (
+            f"[color={colour}]"
+            f"GPS: {status} • {acc:.0f} m • {age:.0f}s"
+            f"[/color]"
+        )
+
     def on_map_style_selected(self, spinner, value):
         print(f"🌍 Switching to map style: {value}")
 
@@ -488,9 +533,6 @@ class RootWidget(FloatLayout):
 
     def center_on_user(self, *_):
         # Ensure GPS fix exists
-        if self.lat is None or self.lon is None:
-            logger.warning("No GPS fix available")
-            return
 
         # Optional: ensure reasonable zoom level
         target_zoom = 16
@@ -499,9 +541,8 @@ class RootWidget(FloatLayout):
             self.mapview.zoom = target_zoom
 
         # Center map
-        self.mapview.center_on(self.lat, self.lon)
+        self.mapview.center_on(self.gps_fix["lat"], self.gps_fix["lon"])
 
-        logger.info(f"Centered map on user: {self.lat}, {self.lon}")
         
 
     def handle_bbox(self, bbox):
@@ -546,8 +587,14 @@ class RootWidget(FloatLayout):
             self.active_user_lbl.text = "Active User: (error)"
         
     @mainthread
-    def set_marker(self, lat, lon, elev):
-        self.lat, self.lon, self.elev = lat, lon, elev
+    def set_marker(self, lat, lon, elev, acc):
+        self.gps_fix = {
+            "lat": lat,
+            "lon": lon,
+            "elev": elev,
+            "accuracy": acc,
+            "timestamp": time.monotonic(),
+        }
         # 2) Create/update marker
         if self.marker is None:
             self.marker = MapMarker(lat=lat, lon=lon, source="Position_icon32.png")
@@ -557,6 +604,51 @@ class RootWidget(FloatLayout):
             self.mapview.remove_marker(self.marker)
             self.marker = MapMarker(lat=lat, lon=lon, source="Position_icon32.png")
             self.mapview.add_marker(self.marker)
+
+    def get_gps_status(self):
+        """Return GPS status information."""
+
+        if self.gps_fix is None:
+            return {
+                "valid": False,
+                "message": "No GPS fix",
+                "age": None,
+                "accuracy": None,
+            }
+
+        age = time.monotonic() - self.gps_fix["timestamp"]
+        accuracy = self.gps_fix["accuracy"]
+
+        valid = (
+            age <= MAX_GPS_AGE and
+            accuracy is not None and
+            accuracy <= MAX_GPS_ACCURACY
+        )
+
+        if age > MAX_GPS_AGE:
+            message = (
+                f"GPS location is stale "
+                f"({age:.0f}s old). Please wait for a new GPS fix."
+            )
+        elif accuracy is None:
+            message = "GPS accuracy unavailable."
+        elif accuracy > MAX_GPS_ACCURACY:
+            message = (
+                f"GPS accuracy is poor ({accuracy:.0f} m). "
+                "Move to an area with better GPS reception."
+            )
+        else:
+            message = (
+                f"GPS OK ({accuracy:.0f} m accuracy, "
+                f"{age:.0f}s old)"
+            )
+
+        return {
+            "valid": valid,
+            "message": message,
+            "age": age,
+            "accuracy": accuracy,
+        }
             
     def region_select(self, instance = None):
         self.close_drawer()
@@ -670,11 +762,8 @@ class RootWidget(FloatLayout):
     #     self.geotiff_overlay = overlay
         
     def record_new_trial(self, instance):
-        if self.lat is None or self.lon is None:
-            print("⚠️ No GPS fix yet.")
-            return
-            
-        popup = LocationPopup(self.lat, self.lon, self.elev, self.create_trial_at)
+
+        popup = LocationPopup(self.gps_fix, self.get_gps_status(), self.create_trial_at)
         popup.open()
 
     def create_trial_at(self, lat, lon, elev, owner, block_name):
@@ -1200,15 +1289,15 @@ class TreeApp(App):
         gps.configure(on_location=self.on_location)
         gps.start(minTime=1000, minDistance=1)
         
-    def start(self, minTime, minDistance):
-        gps.start(minTime, minDistance)
+    # def start(self, minTime, minDistance):
+    #     gps.start(minTime, minDistance)
 
     def stop(self):
         gps.stop()
 
     @mainthread
     def on_location(self, **kwargs):
-        lat, lon, elev = kwargs.get("lat"), kwargs.get("lon"), kwargs.get("altitude")
+        lat, lon, elev, acc = kwargs.get("lat"), kwargs.get("lon"), kwargs.get("altitude"), kwargs.get("accuracy")
         # print(f"📍 GPS update: {lat}, {lon}, elev={elev}")
 
         # If we're not on the map screen yet (user still on login), ignore GPS updates
@@ -1217,7 +1306,7 @@ class TreeApp(App):
 
         try:
             rw = self.get_root_widget()
-            Clock.schedule_once(lambda dt: rw.set_marker(lat, lon, elev))
+            Clock.schedule_once(lambda dt: rw.set_marker(lat, lon, elev, acc))
         except Exception as e:
             print("⚠️ Could not set marker:", e)
         

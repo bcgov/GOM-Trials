@@ -108,9 +108,14 @@ PHOTO_PICKER = IOSPhotoPicker()
 
 
 class LocationPopup(Popup):
-    def __init__(self, default_lat, default_lon, default_elev, on_confirm, **kwargs):
+    def __init__(self, gps_fix, gps_status, on_confirm, **kwargs):
         kwargs.setdefault("auto_dismiss", False)
         super().__init__(**kwargs)
+
+        if not gps_status["valid"]:
+            popup = Popup(title="GPS Error", content=Label(text="No valid GPS fix available. Please try again."), size_hint=(0.8, 0.4))
+            return popup
+        
         self.title = "Set Trial Location"
         self.size_hint = (0.92, 0.75)  # <- a bit taller helps a lot
         self.on_confirm = on_confirm
@@ -123,11 +128,11 @@ class LocationPopup(Popup):
         form.bind(minimum_height=form.setter("height"))
         prev_trial = get_most_recent_trial() or dict()  # avoid None if no trials yet
 
-        self.lat_input = TextInput(text=str(default_lat), hint_text="Latitude",
+        self.lat_input = TextInput(text=str(gps_fix["lat"]), hint_text="Latitude",
                                    multiline=False, size_hint_y=None, height=dp(44))
-        self.lon_input = TextInput(text=str(default_lon), hint_text="Longitude",
+        self.lon_input = TextInput(text=str(gps_fix["lon"]), hint_text="Longitude",
                                    multiline=False, size_hint_y=None, height=dp(44))
-        self.elev_input = TextInput(text=str(default_elev), hint_text="Elevation (m)",
+        self.elev_input = TextInput(text=str(gps_fix["elev"]), hint_text="Elevation (m)",
                                     multiline=False, size_hint_y=None, height=dp(44))
         self.block_input = TextInput(text=prev_trial.get("block_name", "") or "", hint_text="Block name",
                                     multiline=False, size_hint_y=None, height=dp(44))
@@ -140,7 +145,10 @@ class LocationPopup(Popup):
 #
 #        ensure_visible(self.lat_input)
 #        ensure_visible(self.lon_input)
-
+        form.add_widget(Label(text=(
+                            f"GPS: {gps_status['accuracy']:.0f} m • "
+                            f"{gps_status['age']:.0f} s"
+                        ), size_hint_y=None, height=dp(25)))
         form.add_widget(Label(text="Latitude", size_hint_y=None, height=dp(20)))
         form.add_widget(self.lat_input)
         form.add_widget(Label(text="Longitude", size_hint_y=None, height=dp(20)))

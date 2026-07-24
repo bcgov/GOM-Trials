@@ -205,7 +205,7 @@ class OSMSource(MapSource):
 class BGCSource(MapSource):
     def __init__(self, **kwargs):
         super().__init__(
-            url="https://tileserver.thebeczone.ca/data/bgc_Mapped_1961_1990/{z}/{x}/{y}.webp",
+            url="https://tileserver.thebeczone.ca/data/BGC_Tiled_GOM/{z}/{x}/{y}.png",
             attribution="© BGC Map",
             max_zoom=19,
             **kwargs
