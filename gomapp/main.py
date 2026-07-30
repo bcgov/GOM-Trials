@@ -53,15 +53,17 @@ import sys
 
 from assessment import GrowthCell, GrowthGrid
 from config import DB_PATH, API_URL, USER_RE, icon_dict
-from db_trials import upload_trials, download_trials, update_trial, get_trial_row, get_photos_for_trial, upload_photos
+from db_trials import upload_trials, download_trials, update_trial, get_trial_row, get_photos_for_trial, upload_photos, get_trial_year_range, get_trial_owners, save_track, load_track, list_tracks, delete_track, export_gpx
 from db_users import upload_trial_owners, download_trial_owners, init_db, validate_photo_cache, list_users, get_current_user_uuid, set_current_user_uuid, load_current_user_profile, create_user_profile, get_active_user, fetch_users, create_user
 from load_mbtiles import SafeMBTilesMapSource, OSMSource, GoogleHybridSource, GoogleTerrainSource, BGCSource
 # from load_tif import GeoTiffOverlay
-from popups import LocationPopup, TrialFormPopup, DraggableButton, EditTrialPopup
+from popups import LocationPopup, TrialFormPopup, DraggableButton, EditTrialPopup, TrialFilterPopup, SaveTrackPopup, TrackManagerPopup
 from file_picker import pick_files
 from photos import compute_sha256, photos_needed, download_photos
 from selector import RectSelectOverlay
 from gom_logger import logger
+from tracklog import TrackLayer, TrackRecorder
+from utils import SectionHeader, RoundedButton
 
 from kivy.properties import BooleanProperty
 from kivy.graphics import Color, Rectangle
@@ -355,6 +357,15 @@ class RootWidget(FloatLayout):
         )
         self.default_source = self.mapview.map_source
         self.mbtiles_source = None
+
+        self.track_layer = TrackLayer()
+        self.mapview.add_layer(self.track_layer)
+
+        self.track_recorder = TrackRecorder(
+            track_layer=self.track_layer
+        )
+
+        self.track_logging = False
         
         self.add_widget(self.mapview)
 
@@ -396,13 +407,13 @@ class RootWidget(FloatLayout):
         self.add_widget(self.drawer)
         
         # Header row
-        header = BoxLayout(size_hint=(1, None), height=dp(48))
-        self.btn_close = Button(text="✕", size_hint=(None, 1), width=dp(48))
-        self.btn_close.bind(on_release=self.close_drawer)
-        header.add_widget(self.btn_close)
+        # header = BoxLayout(size_hint=(1, None), height=dp(48))
+        # self.btn_close = Button(text="✕", size_hint=(None, 1), width=dp(48))
+        # self.btn_close.bind(on_release=self.close_drawer)
+        # header.add_widget(self.btn_close)
 
-        header.add_widget(Label(text="Menu", halign="left", valign="middle"))
-        self.drawer.add_widget(header)
+        # header.add_widget(Label(text="Menu", halign="left", valign="middle"))
+        # self.drawer.add_widget(header)
         
         self.active_user_lbl = Label(
             text="Active User: (none)",
@@ -426,6 +437,7 @@ class RootWidget(FloatLayout):
             )
             b.bind(on_release=callback)
             self.drawer.add_widget(b)
+            return(b)
 
         #add_menu_item("Upload GeoTIFF", self.pick_geotiff)
         self.gps_label = Label(
@@ -439,20 +451,29 @@ class RootWidget(FloatLayout):
         self.drawer.add_widget(self.gps_label)
         self.start_gps_status_updates()
 
+        trial_label = SectionHeader("TRIAL OPTIONS")
+        track_label = SectionHeader("TRACKS")
+        general_label = SectionHeader("GENERAL")
+        self.drawer.add_widget(trial_label)
         add_menu_item("Record Trial", self.record_new_trial)
         add_menu_item("Sync with Server", self.sync_with_server)
+        add_menu_item("Download Trial Photos", self.region_select)
+        add_menu_item("Filter Trials", self.filter_trials_popup)
+        self.drawer.add_widget(track_label)
+        self.track_button = Button(
+                text="Start Track Log",
+                size_hint=(1, None),
+                height=dp(52),
+                font_size="18sp",
+            )
+        self.track_button.bind(on_release=self.toggle_track_logging)
+        self.drawer.add_widget(self.track_button)
+        self.finish_button = add_menu_item("Finish Track Log", self.finish_track_log)
+        self.finish_button.opacity = 0
+        self.finish_button.height = 0
+        add_menu_item("View Saved Tracks", self.view_saved_tracks)
+        self.drawer.add_widget(general_label)
         add_menu_item("Change user", self.change_user_popup)
-        add_menu_item("Select Photos to Cache", self.region_select)
-        #add_menu_item("Filter Trials", self.filter_trials_popup)
-
-        #add_menu_item("Upload MBTiles", self.pick_mbtiles)
-        #add_menu_item("Remove GeoTIFF", self.remove_geotiff)
-        #add_menu_item("Remove MBTiles", self.remove_mbtiles)
-
-        # def open_filter_popup(self, instance):
-        #     species = set(m.trial_data["species"] for m in self.trial_markers)
-        #     species_dropdown = Spinner()
-
         
         self.map_style_spinner = Spinner(
             text="Map Type",
@@ -464,20 +485,26 @@ class RootWidget(FloatLayout):
                 "Custom MBTiles",
             ],
             size_hint=(1, None),
-            height=dp(48),
+            height=dp(52),
+            font_size="18sp"
         )
-
         self.map_style_spinner.bind(text=self.on_map_style_selected)
         self.drawer.add_widget(self.map_style_spinner)
         
         # Spacer to push things up
         self.drawer.add_widget(Widget())
-        self.btn_open = Button(
+        self.btn_open = RoundedButton(
             text="MENU",
             size_hint=(None, None),
-            size=(dp(50), dp(50)),
+            size=(dp(70), dp(42)),
             pos_hint={"x": 0.02, "top": 0.98},
         )
+        # self.btn_open = Button(
+        #     text="MENU",
+        #     size_hint=(None, None),
+        #     size=(dp(50), dp(50)),
+        #     pos_hint={"x": 0.02, "top": 0.98},
+        # )
         self.btn_open.bind(on_release=self.open_drawer)
         self.add_widget(self.btn_open)
         self._set_scrim(False)
@@ -485,6 +512,38 @@ class RootWidget(FloatLayout):
         self.safe_zone = BottomSafeZone(size_hint=(1, None), height=dp(28), pos_hint={"x": 0, "y": 0})
         self.add_widget(self.safe_zone)
 
+    def toggle_track_logging(self, instance):
+        self.track_logging = not self.track_logging
+        if self.track_logging:
+            self.track_recorder.clear()
+            self.track_recorder.track_layer.new_track()
+            self.track_button.text = "Pause Track Log"
+            self.finish_button.opacity = 1
+            self.finish_button.height = dp(52)
+        else:
+            self.track_button.text = "Start Track Log"
+
+    def view_saved_tracks(self, instance):
+        tracks = list_tracks()
+        TrackManagerPopup(
+            tracks,
+            on_draw=self.draw_track,
+            on_export=self.export_track,
+            on_delete=self.delete_track
+        ).open()
+
+    def draw_track(self, track):
+        loaded = load_track(track["uuid"])
+        self.track_layer.clear()
+        self.track_layer.set_tracks(loaded["tracks"])
+
+    def export_track(self, track):
+        loaded = load_track(track["uuid"])
+        export_gpx(loaded)
+
+    def delete_track(self, track):
+        delete_track(track["uuid"])
+        self.track_layer.clear()
 
     def start_gps_status_updates(self):
         Clock.schedule_interval(self.update_gps_status_label, 1.0)
@@ -543,7 +602,24 @@ class RootWidget(FloatLayout):
         # Center map
         self.mapview.center_on(self.gps_fix["lat"], self.gps_fix["lon"])
 
-        
+    def finish_track_log(self, *_):        
+        track = self.track_recorder.finish()
+        popup = SaveTrackPopup(
+            track=track,
+            on_save=self.on_save_track,
+            on_cancel=self.on_cancel_save
+        )
+
+        popup.open()
+
+    def on_save_track(self, track, name):
+        save_track(track, name)
+        self.track_layer.clear()
+        #self.track_recorder.reset()
+        self.track_logging = False
+
+    def on_cancel_save(self):
+        pass
 
     def handle_bbox(self, bbox):
         lat_min, lon_min, lat_max, lon_max = bbox
@@ -604,6 +680,11 @@ class RootWidget(FloatLayout):
             self.mapview.remove_marker(self.marker)
             self.marker = MapMarker(lat=lat, lon=lon, source="Position_icon32.png")
             self.mapview.add_marker(self.marker)
+
+        if self.track_logging:
+            self.track_recorder.add_fix(
+                self.gps_fix
+            )
 
     def get_gps_status(self):
         """Return GPS status information."""
@@ -760,6 +841,22 @@ class RootWidget(FloatLayout):
     #     overlay = GeoTiffOverlay(path, self.mapview)
     #     self.mapview.add_widget(overlay)
     #     self.geotiff_overlay = overlay
+
+    def filter_trials_popup(self, instance=None):
+        popup = TrialFilterPopup(
+            year_range=get_trial_year_range(),
+            owners=get_trial_owners(),
+            callback=self.load_filtered_trials
+        )
+        popup.open()
+
+    def load_filtered_trials(self, filters):
+        # Clear existing markers
+        self.clear_all_trial_markers()
+
+        # Load trials in background with filters
+        Thread(target=self._load_trials_in_background, args=(filters,), daemon=True).start()
+
         
     def record_new_trial(self, instance):
 
@@ -829,11 +926,46 @@ class RootWidget(FloatLayout):
         self.trial_marker_uuids.clear()
         
     # Async stuff
-    def _load_trials_in_background(self):
+    def _load_trials_in_background(self, filters=None):
         try:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
-            c.execute("SELECT uuid, user_id, id, species, seedlings, seedlot, spacing, lat, lon, strftime('%Y-%m', timestamp) AS year FROM trials")
+            query = """
+            SELECT
+                uuid,
+                user_id,
+                id,
+                species,
+                seedlings,
+                seedlot,
+                spacing,
+                lat,
+                lon,
+                strftime('%Y-%m', timestamp) AS year
+            FROM trials
+            WHERE 1=1
+            """
+
+            params = []
+            
+            if filters:
+                if not filters["all_years"]:
+                    query += """
+                        AND CAST(strftime('%Y', timestamp) AS INTEGER)
+                            BETWEEN ? AND ?
+                    """
+                    params.extend([
+                        filters["year_from"],
+                        filters["year_to"]
+                    ])
+
+                if not filters["all_owners"]:
+                    query += " AND trial_owner = ?"
+                    params.append(filters["owner"])
+
+                query += " ORDER BY timestamp DESC"
+
+            c.execute(query, params)
             rows = c.fetchall()
             conn.close()
 
@@ -1287,7 +1419,7 @@ class TreeApp(App):
     
     def start_gps(self, dt):
         gps.configure(on_location=self.on_location)
-        gps.start(minTime=1000, minDistance=1)
+        gps.start(minTime=500, minDistance=0.5)
         
     # def start(self, minTime, minDistance):
     #     gps.start(minTime, minDistance)
@@ -1319,7 +1451,7 @@ class TreeApp(App):
         return True
 
     def on_resume(self):
-        gps.start(1000, 0)
+        gps.start(500, 0)
         pass
 
 if __name__ == "__main__":

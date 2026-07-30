@@ -1,3 +1,5 @@
+from pathlib import Path
+import re
 import sqlite3
 from config import DB_PATH, API_URL
 from db_users import get_active_user
@@ -7,6 +9,11 @@ import json
 import uuid
 import os
 from gom_logger import logger
+from xml.etree.ElementTree import (
+    Element,
+    SubElement,
+    ElementTree
+)
 
 def upload_trials():
     user = get_active_user()["username"]
@@ -323,6 +330,18 @@ def get_trial_owners():
     conn.close()
     return [r[0] for r in rows]
 
+## function to get min and max planting year for all trials in the database
+def get_trial_year_range():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT MIN(strftime('%Y', timestamp)), MAX(strftime('%Y', timestamp))
+        FROM trials
+    """)
+    row = cur.fetchone()
+    conn.close()
+    return (int(row[0]), int(row[1])) if row and row[0] and row[1] else (None, None)
+
 def add_trial_owner(company, contact_name, contact_email, objective):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -343,3 +362,198 @@ def get_replicate_no(block_name, species_code):
     count = cur.fetchone()[0]
     conn.close()
     return str(count + 1)
+
+### TODO: these could all be combined into a TrackManager class
+def save_track(track, name):
+    """
+    Save a completed track to the local SQLite database.
+
+    Parameters
+    ----------
+
+    track : dict
+        Dictionary returned by TrackRecorder.finish().
+
+    name : str
+        User-supplied track name.
+
+    Returns
+    -------
+    str
+        UUID of the newly-created track.
+    """
+
+    track_uuid = str(uuid.uuid4())
+    conn = sqlite3.connect(DB_PATH)
+    db = conn.cursor()
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS track_logs (
+            uuid TEXT PRIMARY KEY,
+            name TEXT,
+            created DATETIME,
+            distance REAL,
+            point_count INTEGER,
+            track_json TEXT
+        )
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO track_logs (
+            uuid,
+            name,
+            created,
+            distance,
+            point_count,
+            track_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            track_uuid,
+            name,
+            datetime.now(timezone.utc).replace(microsecond=0),
+            track["distance"],
+            track["point_count"],
+            json.dumps(track["tracks"])
+        )
+    )
+
+    conn.commit()
+    conn.close()
+    return track_uuid
+
+def load_track(track_uuid):
+    conn = sqlite3.connect(DB_PATH)
+    db = conn.cursor()
+
+    row = db.execute(
+        """
+        SELECT uuid, name, created, distance, point_count, track_json
+        FROM track_logs
+        WHERE uuid = ?
+        """,
+        (track_uuid,)
+    ).fetchone()
+
+    conn.close()
+    if row is None:
+        return None
+
+    return {
+        "uuid": row[0],
+        "name": row[1],
+        "created": row[2],
+        "distance": row[3],
+        "point_count": row[4],
+        "tracks": json.loads(row[5])
+    }
+
+def list_tracks():
+    conn = sqlite3.connect(DB_PATH)
+    db = conn.cursor()
+
+    rows = db.execute("""
+        SELECT
+            uuid,
+            name,
+            created,
+            distance,
+            point_count
+        FROM track_logs
+        ORDER BY created DESC
+    """).fetchall()
+    tracks = []
+
+    for uuid, name, created, distance, point_count in rows:
+        tracks.append({
+            "uuid": uuid,
+            "name": name,
+            "created": datetime.fromisoformat(created),
+            "distance": distance,
+            "point_count": point_count
+        })
+
+    conn.close()
+    return tracks
+
+def delete_track(track_uuid):
+    conn = sqlite3.connect(DB_PATH)
+    db = conn.cursor()
+
+    db.execute(
+        """
+        DELETE FROM track_logs
+        WHERE uuid = ?
+        """,
+        (track_uuid,)
+    )
+
+    conn.commit()
+    conn.close()
+
+def export_gpx(track):
+        """
+        Export a saved track as a GPX file.
+
+        Parameters
+        ----------
+        track : dict
+            Track data to export.
+        filename : str
+            Output GPX filename.
+
+        Returns
+        -------
+        bool
+            True if successful.
+        """
+
+        if track is None:
+            return False
+        
+        save_dir = Path.home() / "Documents" / "GOM_TrackLogs"
+        save_dir.mkdir(exist_ok=True)
+        name = re.sub(r"[^\w\- ]", "", track["name"])  # Remove invalid characters
+        name = name.strip().replace(" ", "_")
+        filename = save_dir / f"{name}.gpx"
+
+        gpx = Element(
+            "gpx",
+            version="1.1",
+            creator="GOM",
+            xmlns="http://www.topografix.com/GPX/1/1"
+        )
+
+        trk = SubElement(gpx, "trk")
+
+        SubElement(trk, "name").text = track["name"]
+
+        metadata = SubElement(gpx, "metadata")
+        SubElement(metadata, "time").text = (
+            track["created"] + "Z"
+        )
+
+        for segment in track["tracks"]:
+
+            trkseg = SubElement(trk, "trkseg")
+
+            for lat, lon in segment:
+
+                SubElement(
+                    trkseg,
+                    "trkpt",
+                    lat=f"{lat:.8f}",
+                    lon=f"{lon:.8f}"
+                )
+
+        tree = ElementTree(gpx)
+
+        tree.write(
+            filename,
+            encoding="utf-8",
+            xml_declaration=True
+        )
+
+        return True

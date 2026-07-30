@@ -1,4 +1,6 @@
-from db_trials import get_most_recent_trial, add_trial_owner, get_replicate_no, get_trial_owners
+import datetime
+
+from db_trials import get_most_recent_trial, add_trial_owner, get_replicate_no, get_trial_owners, get_trial_year_range
 from kivy.uix.popup import Popup
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.textinput import TextInput
@@ -14,6 +16,8 @@ from kivy.uix.togglebutton import ToggleButton
 from kivy.animation import Animation
 from kivy.app import App
 from kivy.uix.image import Image
+from kivy.uix.checkbox import CheckBox
+from kivy.uix.gridlayout import GridLayout
 from photos import IOSPhotoPicker
 from db_users import download_trial_owners
 from gom_logger import logger
@@ -555,3 +559,446 @@ class EditTrialPopup(Popup):
         }
         self.on_save(data)
         self.dismiss()
+ 
+
+class TrialFilterPopup(Popup):
+    def __init__(self, year_range, owners, callback, **kwargs):
+        super().__init__(**kwargs)
+
+        self.min_year, self.max_year = year_range
+        self.owners = owners
+        self.callback = callback
+        
+
+        years = [str(y) for y in range(self.min_year, self.max_year + 1)]
+
+        root = BoxLayout(
+            orientation="vertical",
+            spacing=dp(12),
+            padding=dp(15),
+        )
+
+        # ----------------------------
+        # Year filter
+        # ----------------------------
+
+        year_row = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(40),
+            spacing=dp(10),
+        )
+
+        self.year_cb = CheckBox(
+            active=True,
+            size_hint=(None, None),
+            size=(dp(36), dp(36))
+        )
+        year_row.add_widget(self.year_cb)
+        year_row.add_widget(Label(
+            text="Show all planting years",
+            halign="left",
+            valign="middle"
+        ))
+
+        root.add_widget(year_row)
+
+        year_panel = GridLayout(
+            cols=2,
+            spacing=dp(10),
+            size_hint_y=None,
+            height=dp(100),
+        )
+
+        year_panel.add_widget(Label(text="From"))
+
+        self.from_spinner = Spinner(
+            text=str(self.min_year),
+            values=years,
+            height=dp(40)
+        )
+        year_panel.add_widget(self.from_spinner)
+
+        year_panel.add_widget(Label(text="To"))
+
+        self.to_spinner = Spinner(
+            text=str(self.max_year),
+            values=years,
+            height=dp(40)
+        )
+        year_panel.add_widget(self.to_spinner)
+
+        year_panel.disabled = True
+        year_panel.opacity = 0
+
+        root.add_widget(year_panel)
+
+        # ----------------------------
+        # Owner filter
+        # ----------------------------
+
+        owner_row = BoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(40),
+            spacing=dp(10),
+        )
+
+        self.owner_cb = CheckBox(
+            active=True,
+            size_hint=(None, None),
+            size=(dp(36), dp(36))
+        )
+        owner_row.add_widget(self.owner_cb)
+        owner_row.add_widget(Label(
+            text="Show all trial owners",
+            halign="left",
+            valign="middle"
+        ))
+
+        root.add_widget(owner_row)
+
+        self.owner_spinner = Spinner(
+            text=owners[0] if owners else "",
+            values=owners,
+            size_hint_y=None,
+            height=dp(40)
+        )
+
+        self.owner_spinner.disabled = True
+        self.owner_spinner.opacity = 0
+
+        root.add_widget(self.owner_spinner)
+
+        # ----------------------------
+        # Enable / disable callbacks
+        # ----------------------------
+
+        def update_year_panel(*args):
+            enabled = not self.year_cb.active
+            year_panel.disabled = not enabled
+            year_panel.opacity = 1 if enabled else 0
+
+        self.year_cb.bind(active=update_year_panel)
+
+        def update_owner_spinner(*args):
+            enabled = not self.owner_cb.active
+            self.owner_spinner.disabled = not enabled
+            self.owner_spinner.opacity = 1 if enabled else 0
+
+        self.owner_cb.bind(active=update_owner_spinner)
+
+        # ----------------------------
+        # Buttons
+        # ----------------------------
+
+        button_row = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(12))
+
+        apply_btn = Button(text="Apply", size_hint_y=None, height=dp(44))
+        apply_btn.bind(on_release=self.apply_trial_filters)
+
+        cancel_btn = Button(text="Cancel", size_hint_y=None, height=dp(44))
+        cancel_btn.bind(on_release=lambda x: self.dismiss())
+
+        button_row.add_widget(cancel_btn)
+        button_row.add_widget(apply_btn)
+
+        root.add_widget(button_row)
+
+        self.title = "Filter Trials"
+        self.content = root
+        self.size_hint = (0.92, 0.8)
+        self.auto_dismiss = False
+    
+    def apply_trial_filters(self, *_):
+        filters = {
+            "all_years": self.year_cb.active,
+            "year_from": int(self.from_spinner.text),
+            "year_to": int(self.to_spinner.text),
+            "all_owners": self.owner_cb.active,
+            "owner": self.owner_spinner.text
+        }
+        self.callback(filters)
+        self.dismiss()
+
+class SaveTrackPopup(Popup):
+
+    def __init__(self, track, on_save, on_cancel=None, **kwargs):
+        super().__init__(**kwargs)
+
+        self.track = track
+        self.on_save = on_save
+        self.on_cancel = on_cancel
+
+        self.title = "Save Track"
+        self.size_hint = (0.9, 0.85)
+        self.auto_dismiss = False
+
+        root = BoxLayout(
+            orientation="vertical",
+            padding=dp(20),
+            spacing=dp(16)
+        )
+
+        # ----------------------------------------------------------
+        # Track summary
+        # ----------------------------------------------------------
+
+        summary = GridLayout(
+            cols=2,
+            spacing=dp(8),
+            row_force_default=True,
+            row_default_height=dp(32),
+            size_hint_y=None
+        )
+        summary.bind(minimum_height=summary.setter("height"))
+
+        summary.add_widget(Label(text="Distance:", halign="left"))
+        summary.add_widget(Label(
+            text=f"{track['distance']:.0f} m",
+            halign="left"))
+
+        summary.add_widget(Label(text="Points:", halign="left"))
+        summary.add_widget(Label(
+            text=str(track["point_count"]),
+            halign="left"))
+
+        root.add_widget(summary)
+
+        # ----------------------------------------------------------
+        # Name input
+        # ----------------------------------------------------------
+
+        root.add_widget(Label(
+            text="Track name:",
+            size_hint_y=None,
+            height=dp(30)
+        ))
+
+        self.name_input = TextInput(
+            multiline=False,
+            write_tab=False,
+            size_hint_y=None,
+            height=dp(44)
+        )
+
+        root.add_widget(self.name_input)
+        root.add_widget(Widget())
+        # ----------------------------------------------------------
+        # Buttons
+        # ----------------------------------------------------------
+
+        buttons = BoxLayout(
+            spacing=dp(12),
+            size_hint_y=None,
+            height=dp(44)
+        )
+
+        cancel_btn = Button(text="Cancel")
+        save_btn = Button(text="Save")
+
+        cancel_btn.bind(on_release=self.cancel)
+        save_btn.bind(on_release=self.save)
+
+        buttons.add_widget(cancel_btn)
+        buttons.add_widget(save_btn)
+
+        root.add_widget(buttons)
+
+        self.content = root
+
+    # --------------------------------------------------------------
+
+    def save(self, *args):
+
+        name = self.name_input.text.strip()
+
+        if not name:
+            name = "Untitled Track"
+
+        self.dismiss()
+
+        if self.on_save:
+            self.on_save(self.track, name)
+
+    # --------------------------------------------------------------
+
+    def cancel(self, *args):
+
+        self.dismiss()
+
+        if self.on_cancel:
+            self.on_cancel(self.track)
+
+    # --------------------------------------------------------------
+
+    @staticmethod
+    def format_duration(seconds):
+
+        seconds = int(round(seconds))
+
+        h, rem = divmod(seconds, 3600)
+        m, s = divmod(rem, 60)
+
+        if h:
+            return f"{h:d}:{m:02d}:{s:02d}"
+        else:
+            return f"{m:d}:{s:02d}"
+        
+
+class TrackManagerPopup(Popup):
+
+    def __init__(self,
+                 tracks,
+                 on_draw=None,
+                 on_export=None,
+                 on_delete=None,
+                 **kwargs):
+
+        super().__init__(**kwargs)
+
+        self.tracks = tracks
+        self.on_draw = on_draw
+        self.on_export = on_export
+        self.on_delete = on_delete
+
+        self.title = "Saved Tracks"
+        self.size_hint = (0.9, 0.9)
+        self.auto_dismiss = True
+
+        root = BoxLayout(
+            orientation="vertical",
+            spacing=dp(12),
+            padding=dp(20)
+        )
+
+        scroll = ScrollView()
+
+        self.grid = GridLayout(
+            cols=1,
+            spacing=dp(8),
+            size_hint_y=None
+        )
+        self.grid.bind(minimum_height=self.grid.setter("height"))
+
+        scroll.add_widget(self.grid)
+        root.add_widget(scroll)
+
+        close = Button(
+            text="Close",
+            size_hint_y=None,
+            height=dp(44)
+        )
+        close.bind(on_release=lambda *_: self.dismiss())
+
+        root.add_widget(close)
+
+        self.content = root
+
+        self.populate()
+
+    def populate(self):
+        self.grid.clear_widgets()
+        if not self.tracks:
+            self.grid.add_widget(
+                Label(
+                    text="No saved tracks.",
+                    size_hint_y=None,
+                    height=dp(60)
+                )
+            )
+            return
+        for track in sorted(
+                self.tracks,
+                key=lambda t: t["created"],
+                reverse=True):
+            btn = Button(
+                text=self.format_track(track),
+                markup=True,
+                halign="left",
+                valign="middle",
+                text_size=(None, None),
+                size_hint_y=None,
+                height=dp(72)
+            )
+            btn.track = track
+            btn.bind(on_release=self.track_selected)
+
+            self.grid.add_widget(btn)
+    
+    def format_track(self, track):
+        created = track["created"]
+        if isinstance(created, str):
+            created = datetime.fromisoformat(created)
+
+        if track["distance"] >= 1000:
+            distance = f"{track['distance']/1000:.2f} km"
+        else:
+            distance = f"{track['distance']:.0f} m"
+
+        return (
+            f"[b]{track['name']}[/b]\n"
+            f"{created:%d %b %Y %H:%M}    "
+            f"{distance}    "
+        )
+        
+    def track_selected(self, button):
+
+        TrackActionPopup(
+            button.track,
+            on_draw=self.on_draw,
+            on_export=self.on_export,
+            on_delete=self.on_delete
+        ).open()
+
+class TrackActionPopup(Popup):
+
+    def __init__(self,
+                 track,
+                 on_draw=None,
+                 on_export=None,
+                 on_delete=None,
+                 **kwargs):
+
+        super().__init__(**kwargs)
+
+        self.track = track
+
+        self.title = track["name"]
+        self.size_hint = (0.8, 0.6)
+
+        root = BoxLayout(
+            orientation="vertical",
+            spacing=dp(12),
+            padding=dp(20)
+        )
+
+        for text, callback in [
+            ("Draw", on_draw),
+            ("Export GPX", on_export),
+            ("Delete", on_delete),
+            ("Cancel", None)
+        ]:
+
+            btn = Button(
+                text=text,
+                size_hint_y=None,
+                height=dp(44)
+            )
+
+            if callback is None:
+                btn.bind(on_release=lambda *_: self.dismiss())
+            else:
+                btn.bind(
+                    on_release=lambda _, cb=callback:
+                    self.run_callback(cb)
+                )
+
+            root.add_widget(btn)
+
+        self.content = root
+
+    def run_callback(self, callback):
+        self.dismiss()
+        if callback:
+            callback(self.track)
