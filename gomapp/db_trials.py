@@ -9,6 +9,7 @@ import json
 import uuid
 import os
 from gom_logger import logger
+from db_users import db_connection
 from xml.etree.ElementTree import (
     Element,
     SubElement,
@@ -17,13 +18,12 @@ from xml.etree.ElementTree import (
 
 def upload_trials():
     user = get_active_user()["username"]
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
+    with db_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
 
     cur.execute("SELECT * FROM trials WHERE synced=0 AND user_id = ?", (user,))
     trials = [dict(row) for row in cur.fetchall()]
-    conn.close()
     print(f"There are {len(trials)} records")
     if not trials:
         print("✅ No local records to upload.")
@@ -32,12 +32,10 @@ def upload_trials():
     try:
         r = requests.post(f"{API_URL}/trials", json=trials, timeout=10)
         if r.status_code == 200:
-            dbcon = sqlite3.connect(DB_PATH)
-            cur = dbcon.cursor()
-            for t in trials:
-                cur.execute("UPDATE trials SET synced=1 WHERE uuid=?", (t["uuid"],))
-            dbcon.commit()
-            dbcon.close()
+            with db_connection() as conn:
+                cur = conn.cursor()
+                for t in trials:
+                    cur.execute("UPDATE trials SET synced=1 WHERE uuid=?", (t["uuid"],))
             print(f"⬆️  Uploaded {len(trials)} records")
         else:
             print("⚠️ Upload failed:", r.status_code, r.text)
@@ -155,11 +153,25 @@ def update_trial(uuid, data): ## Question: should we record who updated the tria
     conn.close()
     return ts
     
+def update_trial_location(uuid, data): 
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE trials
+        SET lat = ?,
+            lon = ?,
+            synced=0
+        WHERE uuid=?
+    """, (data["lat"], data["lon"],  uuid))
+
+    conn.commit()
+    conn.close()
+
 def get_trial_row(uuid):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""
-        SELECT uuid, user_id, species, seedlings, seedlot, spacing, request_key, site_series, smr, snr, site_fact, site_prep, notes, trial_owner, block_name, replicate_no
+        SELECT uuid, lat, lon, user_id, species, seedlings, seedlot, spacing, request_key, site_series, smr, snr, site_fact, site_prep, notes, trial_owner, block_name, replicate_no
         FROM trials
         WHERE uuid=?
     """, (uuid,))
@@ -169,7 +181,7 @@ def get_trial_row(uuid):
     if not row:
         return None
 
-    keys = ["uuid","user_id", "species","seedlings","seedlot","spacing", "request_key", "site_series", "smr", "snr", "site_factors", "site_prep", "notes", "trial_owner", "block_name", "replicate_no"]
+    keys = ["uuid", "lat", "lon", "user_id", "species","seedlings","seedlot","spacing", "request_key", "site_series", "smr", "snr", "site_factors", "site_prep", "notes", "trial_owner", "block_name", "replicate_no"]
     return dict(zip(keys, row))
 
 def get_most_recent_trial():
@@ -557,3 +569,51 @@ def export_gpx(track):
         )
 
         return True
+
+## Assessment table functions
+def ensure_trial_trees(trial_uuids, conn=None, rows=5, cols=5):
+
+    if isinstance(trial_uuids, str):
+        trial_uuids = [trial_uuids]
+
+    records = []
+
+    for trial_uuid in trial_uuids:
+        namespace = uuid.UUID(trial_uuid)
+
+        for row in range(rows):
+            for col in range(cols):
+
+                tree_number = row * cols + col + 1
+
+                tree_uuid = str(
+                    uuid.uuid5(
+                        namespace,
+                        f"tree-{tree_number}"
+                    )
+                )
+
+                records.append((
+                    tree_uuid,
+                    trial_uuid,
+                    tree_number,
+                    row,
+                    col
+                ))
+
+    sql = """
+        INSERT OR IGNORE INTO trial_trees (
+            tree_uuid,
+            trial_uuid,
+            tree_number,
+            row_num,
+            col_num
+        )
+        VALUES (?, ?, ?, ?, ?)
+    """
+
+    if conn is not None:
+        conn.executemany(sql, records)
+    else:
+        with db_connection() as conn:
+            conn.executemany(sql, records)

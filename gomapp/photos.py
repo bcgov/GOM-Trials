@@ -9,7 +9,7 @@ import requests
 
 UIImagePickerController = autoclass("UIImagePickerController")
 UIApplication = autoclass("UIApplication")
-ImagePickerDelegate = autoclass("ImagePickerDelegate")  # your Obj-C delegate
+ImagePickerDelegate = autoclass("ImagePickerDelegate")  # Obj-C delegate
 NSFileManager = autoclass("NSFileManager")
 
 def get_docs_dir():

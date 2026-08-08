@@ -16,3 +16,7 @@ icon_dict = {
     "py": "Py_icon32.png",
     "lw": "Lw_icon32.png",
 }
+
+damage_dict = {
+    "Dead top": "dl", "Chlorotic": "cl", "Red foliage": "rd", "Forked/broken": "fk", "Overtopped": "vc", "Pressed": "vp", "Bent Stem": "b", "Small": "s", "Animal damage": "a", "Frost damage": "ng", "Drought": "nd"
+}

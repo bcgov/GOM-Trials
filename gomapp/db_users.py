@@ -6,10 +6,29 @@ import uuid
 import os
 import requests
 from gom_logger import logger
+from contextlib import contextmanager
+
+@contextmanager
+def db_connection():
+    conn = sqlite3.connect(DB_PATH)
+
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        yield conn
+        conn.commit()
+
+    except:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    c.execute("PRAGMA foreign_keys = ON")
     c.execute("""
         CREATE TABLE IF NOT EXISTS trials (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,9 +102,116 @@ def init_db():
           FOREIGN KEY(trial_uuid) REFERENCES trials(uuid) ON DELETE CASCADE
         )
     """)
+
+    init_assessment_tables(c)
     
     conn.commit()
     conn.close()
+
+def init_assessment_tables(c):
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS trial_trees (
+            tree_uuid TEXT PRIMARY KEY,
+            trial_uuid TEXT NOT NULL,
+            tree_number INTEGER NOT NULL,
+            row_num INTEGER NOT NULL,
+            col_num INTEGER NOT NULL,
+
+            UNIQUE(trial_uuid, tree_number),
+            UNIQUE(trial_uuid, row_num, col_num),
+
+            FOREIGN KEY(trial_uuid)
+                REFERENCES trials(uuid)
+                ON DELETE CASCADE
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS assessments (
+            assessment_uuid TEXT PRIMARY KEY,
+            trial_uuid TEXT NOT NULL,
+            user_uuid TEXT,
+            assessment_date DATETIME NOT NULL,
+
+            trial_rating TEXT,
+            notes TEXT,
+
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            synced BOOLEAN DEFAULT 0,
+
+            FOREIGN KEY(trial_uuid)
+                REFERENCES trials(uuid)
+                ON DELETE CASCADE,
+
+            FOREIGN KEY(user_uuid)
+                REFERENCES users(user_uuid)
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS tree_assessments (
+            tree_assessment_uuid TEXT PRIMARY KEY,
+            assessment_uuid TEXT NOT NULL,
+            tree_uuid TEXT NOT NULL,
+
+            rating TEXT NOT NULL,
+            height REAL,
+            diameter REAL,
+
+            UNIQUE(assessment_uuid, tree_uuid),
+
+            FOREIGN KEY(assessment_uuid)
+                REFERENCES assessments(assessment_uuid)
+                ON DELETE CASCADE,
+
+            FOREIGN KEY(tree_uuid)
+                REFERENCES trial_trees(tree_uuid)
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS assessment_damage (
+            damage_uuid TEXT PRIMARY KEY,
+            tree_assessment_uuid TEXT NOT NULL,
+            damage_code TEXT NOT NULL,
+            severity INTEGER NOT NULL
+                CHECK(severity BETWEEN 1 AND 3),
+
+            UNIQUE(tree_assessment_uuid, damage_code),
+
+            FOREIGN KEY(tree_assessment_uuid)
+                REFERENCES tree_assessments(tree_assessment_uuid)
+                ON DELETE CASCADE
+        )
+    """)
+
+    # Useful lookup indexes
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_trial_trees_trial
+        ON trial_trees(trial_uuid)
+    """)
+
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_assessments_trial
+        ON assessments(trial_uuid)
+    """)
+
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_tree_assessments_assessment
+        ON tree_assessments(assessment_uuid)
+    """)
+
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_tree_assessments_tree
+        ON tree_assessments(tree_uuid)
+    """)
+
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_assessment_damage_tree_assessment
+        ON assessment_damage(tree_assessment_uuid)
+    """)
 
 def validate_photo_cache():
     conn = sqlite3.connect(DB_PATH)

@@ -21,7 +21,8 @@ from kivy.uix.gridlayout import GridLayout
 from photos import IOSPhotoPicker
 from db_users import download_trial_owners
 from gom_logger import logger
-
+from utils import RoundedButton
+from assessment import AssessmentPanel, GrowthGrid
 
 import uuid
 
@@ -559,6 +560,54 @@ class EditTrialPopup(Popup):
         }
         self.on_save(data)
         self.dismiss()
+
+class EditLocationPopup(Popup):
+    def __init__(self, trial_row: dict, on_save, get_current_gps, **kwargs):
+        #kwargs.setdefault("auto_dismiss", False)
+        super().__init__(**kwargs)
+        self.title = "Edit Trial Location"
+        self.size_hint = (0.92, 0.85)
+
+        self.trial = trial_row
+        self.on_save = on_save
+        self.get_current_gps = get_current_gps
+
+        root = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(10))
+        self.lat_input = TextInput(text=str(trial_row["lat"]), hint_text="Latitude",
+                                   multiline=False, size_hint_y=None, height=dp(44))
+        self.lon_input = TextInput(text=str(trial_row["lon"]), hint_text="Longitude",
+                                   multiline=False, size_hint_y=None, height=dp(44))
+        gps_butt = RoundedButton(text = "Use Current Location", size_hint=(None, None), size = (dp(200), dp(44)))
+        gps_butt.bind(on_release = self.update_location)
+        root.add_widget(self.lat_input)
+        root.add_widget(self.lon_input)
+        root.add_widget(gps_butt)
+        root.add_widget(Widget())
+
+        # Fixed button row (not scrollable)
+        btn_row = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(10))
+        btn_cancel = Button(text="Cancel")
+        btn_save = Button(text="Save")
+        btn_cancel.bind(on_release=lambda *_: self.dismiss())
+        btn_save.bind(on_release=self._save)
+        btn_row.add_widget(btn_cancel)
+        btn_row.add_widget(btn_save)
+        root.add_widget(btn_row)
+
+        self.content = root
+
+    def update_location(self, *_):
+        gps_fix = self.get_current_gps()
+        self.lat_input.text = str(gps_fix["lat"])
+        self.lon_input.text = str(gps_fix["lon"])
+
+    def _save(self, *_):
+        data = {
+            "lat": self.lat_input.text.strip(),
+            "lon": self.lon_input.text.strip(),
+        }
+        self.on_save(data)
+        self.dismiss()
  
 
 class TrialFilterPopup(Popup):
@@ -723,12 +772,13 @@ class TrialFilterPopup(Popup):
 
 class SaveTrackPopup(Popup):
 
-    def __init__(self, track, on_save, on_cancel=None, **kwargs):
+    def __init__(self, track, on_save, on_cancel, on_delete, **kwargs):
         super().__init__(**kwargs)
 
         self.track = track
         self.on_save = on_save
         self.on_cancel = on_cancel
+        self.on_delete = on_delete
 
         self.title = "Save Track"
         self.size_hint = (0.9, 0.85)
@@ -795,19 +845,26 @@ class SaveTrackPopup(Popup):
         )
 
         cancel_btn = Button(text="Cancel")
+        delete_btn = Button(text = "Delete")
         save_btn = Button(text="Save")
 
         cancel_btn.bind(on_release=self.cancel)
         save_btn.bind(on_release=self.save)
+        delete_btn.bind(on_release=self.delete)
 
         buttons.add_widget(cancel_btn)
         buttons.add_widget(save_btn)
+        buttons.add_widget(delete_btn)
 
         root.add_widget(buttons)
 
         self.content = root
 
     # --------------------------------------------------------------
+
+    def delete(self, *args):
+        self.dismiss()
+        self.on_delete()
 
     def save(self, *args):
 
@@ -1002,3 +1059,168 @@ class TrackActionPopup(Popup):
         self.dismiss()
         if callback:
             callback(self.track)
+
+
+
+class AssessmentPopup(Popup):
+
+    def __init__(self,
+                 marker,
+                 existing=None,
+                 damage_agents=None,
+                 save_callback=None,
+                 **kwargs):
+
+        super().__init__(**kwargs)
+
+        self.marker = marker
+        self.save_callback = save_callback
+
+        self.title = "Tree Growth Assessment"
+
+        self.size_hint = (0.95, 0.95)
+        self.auto_dismiss = False
+        self.bind(on_dismiss=self._on_dismiss)
+
+        root = BoxLayout(
+            orientation="vertical",
+            spacing=dp(10),
+            padding=dp(10)
+        )
+
+        # ------------------------------------------------------
+        # Growth grid
+        # ------------------------------------------------------
+
+        self.grid = GrowthGrid(
+            existing=existing,
+            callback=self.tree_selected,
+            size_hint=(1, None),
+            height=dp(320)
+        )
+
+        root.add_widget(self.grid)
+
+        # ------------------------------------------------------
+        # Assessment panel
+        # ------------------------------------------------------
+
+        self.panel = AssessmentPanel(
+            damage_agents=damage_agents,
+            previous_callback=self.previous_tree,
+            next_callback=self.next_tree,
+            change_callback=self.assessment_changed
+        )
+
+        self.panel_scroll = ScrollView(
+            do_scroll_x=False,
+            size_hint=(1, 1),
+        )
+
+        self.panel_scroll.add_widget(self.panel)
+
+        self.panel_container = BoxLayout(
+            orientation="vertical",
+            size_hint_y=None,
+            height=0,
+        )
+
+        self.panel_container.add_widget(self.panel_scroll)
+
+        root.add_widget(self.panel_container)
+
+        # ------------------------------------------------------
+        # Buttons
+        # ------------------------------------------------------
+
+        button_row = BoxLayout(
+            spacing=dp(10),
+            size_hint_y=None,
+            height=dp(44)
+        )
+
+        cancel_btn = Button(text="Cancel")
+        cancel_btn.bind(on_release=lambda *_: self.dismiss())
+
+        save_btn = Button(
+            text="Save Assessment",
+            background_normal="",
+            background_color=(0.2, 0.6, 0.2, 1)
+        )
+
+        save_btn.bind(on_release=self.save)
+
+        button_row.add_widget(cancel_btn)
+        button_row.add_widget(save_btn)
+
+        root.add_widget(button_row)
+
+        self.content = root
+
+
+    def show_panel(self):
+        if self.panel_container.height > 0:
+            return
+        
+        button_height = dp(44)
+        spacing = dp(30)      # padding + spacing
+
+        target_grid = (
+            self.height
+            - button_height
+            - spacing
+            - dp(380)
+        )
+
+        target_grid = max(target_grid, dp(180))
+        
+        Animation(
+            height=dp(380),
+            d=0.25,
+            t="out_quad"
+        ).start(self.panel_container)
+
+        Animation(
+            height=dp(260),
+            width=dp(260),
+            d=0.25,
+            t="out_quad"
+        ).start(self.grid)
+
+    # ==========================================================
+    # Grid callbacks
+    # ==========================================================
+
+    def tree_selected(self, *_):
+        self.show_panel()
+        self.grid.load_selected_into(self.panel)
+
+    # ==========================================================
+    # Panel callbacks
+    # ==========================================================
+
+    def assessment_changed(self):
+        self.grid.update_selected()
+
+    def previous_tree(self):
+        self.grid.previous_cell()
+
+    def next_tree(self):
+        self.grid.next_cell()
+
+    # ==========================================================
+    # Save
+    # ==========================================================
+
+    def save(self, *_):
+
+        if self.save_callback:
+            self.save_callback(
+                self.marker,
+                self.grid.data
+            )
+
+        self.dismiss()
+
+    def _on_dismiss(self, *_):
+        self.panel.destroy()

@@ -51,13 +51,13 @@ from plyer import gps
 import sys
 
 
-from assessment import GrowthCell, GrowthGrid
+from assessment_db import create_assessment
 from config import DB_PATH, API_URL, USER_RE, icon_dict
-from db_trials import upload_trials, download_trials, update_trial, get_trial_row, get_photos_for_trial, upload_photos, get_trial_year_range, get_trial_owners, save_track, load_track, list_tracks, delete_track, export_gpx
+from db_trials import upload_trials, download_trials, update_trial, update_trial_location, get_trial_row, get_photos_for_trial, upload_photos, get_trial_year_range, get_trial_owners, save_track, load_track, list_tracks, delete_track, export_gpx, ensure_trial_trees
 from db_users import upload_trial_owners, download_trial_owners, init_db, validate_photo_cache, list_users, get_current_user_uuid, set_current_user_uuid, load_current_user_profile, create_user_profile, get_active_user, fetch_users, create_user
 from load_mbtiles import SafeMBTilesMapSource, OSMSource, GoogleHybridSource, GoogleTerrainSource, BGCSource
 # from load_tif import GeoTiffOverlay
-from popups import LocationPopup, TrialFormPopup, DraggableButton, EditTrialPopup, TrialFilterPopup, SaveTrackPopup, TrackManagerPopup
+from popups import LocationPopup, TrialFormPopup, DraggableButton, EditTrialPopup, EditLocationPopup, TrialFilterPopup, SaveTrackPopup, TrackManagerPopup, AssessmentPopup
 from file_picker import pick_files
 from photos import compute_sha256, photos_needed, download_photos
 from selector import RectSelectOverlay
@@ -65,10 +65,13 @@ from gom_logger import logger
 from tracklog import TrackLayer, TrackRecorder
 from utils import SectionHeader, RoundedButton
 
+
 from kivy.properties import BooleanProperty
 from kivy.graphics import Color, Rectangle
 from kivy.uix.image import Image
 from kivy.uix.behaviors import ButtonBehavior
+
+#NumericFieldBridge = autoclass("NumericFieldBridge")
 
 MAX_GPS_AGE = 5          # seconds
 MAX_GPS_ACCURACY = 20    # metres
@@ -469,6 +472,7 @@ class RootWidget(FloatLayout):
         self.track_button.bind(on_release=self.toggle_track_logging)
         self.drawer.add_widget(self.track_button)
         self.finish_button = add_menu_item("Finish Track Log", self.finish_track_log)
+        self.finish_button.bind(on_release=self.toggle_track_logging)
         self.finish_button.opacity = 0
         self.finish_button.height = 0
         add_menu_item("View Saved Tracks", self.view_saved_tracks)
@@ -490,7 +494,12 @@ class RootWidget(FloatLayout):
         )
         self.map_style_spinner.bind(text=self.on_map_style_selected)
         self.drawer.add_widget(self.map_style_spinner)
-        
+
+        # self.field = NumericFieldBridge.alloc().initDecimal_(True)
+        # self.field.setPlaceholder_("Height (cm)")
+        # self.field.show()
+        # self.field.becomeFirstResponder()
+
         # Spacer to push things up
         self.drawer.add_widget(Widget())
         self.btn_open = RoundedButton(
@@ -522,6 +531,8 @@ class RootWidget(FloatLayout):
             self.finish_button.height = dp(52)
         else:
             self.track_button.text = "Start Track Log"
+            self.finish_button.opacity = 0
+            self.finish_button.height = 0
 
     def view_saved_tracks(self, instance):
         tracks = list_tracks()
@@ -607,19 +618,21 @@ class RootWidget(FloatLayout):
         popup = SaveTrackPopup(
             track=track,
             on_save=self.on_save_track,
-            on_cancel=self.on_cancel_save
+            on_cancel=None,
+            on_delete=self.delete_track
         )
 
         popup.open()
+
+    def delete_track(self, *args):
+        self.track_layer.clear()
+        self.track_logging = False
 
     def on_save_track(self, track, name):
         save_track(track, name)
         self.track_layer.clear()
         #self.track_recorder.reset()
         self.track_logging = False
-
-    def on_cancel_save(self):
-        pass
 
     def handle_bbox(self, bbox):
         lat_min, lon_min, lat_max, lon_max = bbox
@@ -685,6 +698,9 @@ class RootWidget(FloatLayout):
             self.track_recorder.add_fix(
                 self.gps_fix
             )
+
+    def get_current_gps(self):
+        return self.gps_fix
 
     def get_gps_status(self):
         """Return GPS status information."""
@@ -1099,6 +1115,8 @@ class RootWidget(FloatLayout):
         )
 
         box.bind(minimum_height=box.setter("height"))
+        ##ensure trees exist for assessment
+        ensure_trial_trees(marker.uuid)
 
         # --- Info text ---
         info_text = (
@@ -1149,8 +1167,21 @@ class RootWidget(FloatLayout):
         )
         box.add_widget(edit_btn)
 
+        # --- Edit Location ---
+        loc_btn = Button(
+            text="Edit Location",
+            size_hint_y=None,
+            height=dp(80),
+            background_normal="",
+            background_color=(0.5, 0.2, 0.6, 0.9),
+        )
+        loc_btn.bind(
+            on_release=lambda *_: (popup.dismiss(), self.open_edit_location(marker))
+        )
+        box.add_widget(loc_btn)
+
         # add some spacing before delete button
-        box.add_widget(Widget(size_hint_y=None, height=dp(20)))
+        #box.add_widget(Widget(size_hint_y=None, height=dp(20)))
 
         # --- Delete button ---
         delete_btn = Button(
@@ -1165,20 +1196,18 @@ class RootWidget(FloatLayout):
         )
         box.add_widget(delete_btn)
 
-        
-
         # --- Assessment ---
-        # growth_button = Button(
-        #     text="Add Assessment",
-        #     size_hint_y=None,
-        #     height=80,
-        #     background_normal="",
-        #     background_color=(0.8, 0.1, 0.8, 0.9),
-        # )
-        # growth_button.bind(
-        #     on_release=lambda *_: (popup.dismiss(), self.open_growth_popup(marker))
-        # )
-        # box.add_widget(growth_button)
+        growth_button = Button(
+            text="Add Assessment",
+            size_hint_y=None,
+            height=dp(80),
+            background_normal="",
+            background_color=(0.8, 0.1, 0.8, 0.9),
+        )
+        growth_button.bind(
+            on_release=lambda *_: (popup.dismiss(), self.open_growth_popup(marker))
+        )
+        box.add_widget(growth_button)
 
         scroll = ScrollView(do_scroll_x=False)
         scroll.add_widget(box)
@@ -1281,50 +1310,43 @@ class RootWidget(FloatLayout):
             # self.refresh_trial_marker(uuid)
 
         EditTrialPopup(trial_row=trial, on_save=_on_save).open()
+
+    def open_edit_location(self, marker):
+        uuid = marker.uuid
+        trial = get_trial_row(uuid)
+        if not trial:
+            print("⚠️ Trial not found:", uuid)
+            return
+
+        def _on_save(edited): ##may need to change this
+            update_trial_location(
+                uuid=uuid,
+                data=edited
+            )
+            print("✅ Location updated locally, marked for sync")
+
+            # Optional: refresh markers/popup UI
+            # self.refresh_trial_marker(uuid)
+        EditLocationPopup(trial_row=trial, on_save=_on_save, get_current_gps = self.get_current_gps).open()
         
     def open_growth_popup(self, marker):
-        """Open the 5×5 assessment grid for this trial."""
-        grid_data = self.load_growth_grid(marker)
+        #data = load_assessment(assessment_uuid)
+        ## need to get available assessment uuids for this trial
+        AssessmentPopup(
+            marker=marker,
+            existing=None,
+            save_callback=self.save_assessment,
+        ).open()
 
-        popup_box = BoxLayout(orientation="vertical", spacing=10, padding=10)
-
-        # Create the grid widget
-        self.growth_grid_widget = GrowthGrid(existing=grid_data)
-        popup_box.add_widget(self.growth_grid_widget)
-
-        save_btn = Button(
-            text="Save Assessment",
-            size_hint_y=None,
-            height=60,
-            background_normal="",
-            background_color=(0.2, 0.6, 0.2, 1),
+    def save_assessment(self, marker, data):
+        print("Saving assessment for trial:", marker.uuid)
+        create_assessment(
+            trial_uuid=marker.uuid,
+            user_uuid=load_current_user_profile()["user_uuid"],
+            grid_data=data,
+            trial_rating=None,
+            notes=None
         )
-        save_btn.bind(on_release=lambda *_: self.save_grid(marker))
-        popup_box.add_widget(save_btn)
-
-        self.assessment_popup = Popup(
-            title="Tree Growth Assessment (5×5)",
-            content=popup_box,
-            size_hint=(0.9, 0.9),
-        )
-        self.assessment_popup.open()
-
-    def save_grid(self, marker):
-        grid = self.growth_grid_widget.get_grid()
-        payload = json.dumps({"grid": grid})
-        print("Grid data:", payload)
-
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                UPDATE trials
-                SET growth_grid = ?
-                WHERE uuid = ?
-            """, (payload, marker.uuid))
-            conn.commit()
-
-        self.assessment_popup.dismiss()
-        print(f"Saved growth grid for trial {marker.trial_id}")
 
         
     def load_growth_grid(self, marker):
