@@ -51,10 +51,10 @@ from plyer import gps
 import sys
 
 
-from assessment_db import create_assessment
+from assessment_db import create_assessment, download_assessments, upload_assessments
 from config import DB_PATH, API_URL, USER_RE, icon_dict
 from db_trials import upload_trials, download_trials, update_trial, update_trial_location, get_trial_row, get_photos_for_trial, upload_photos, get_trial_year_range, get_trial_owners, save_track, load_track, list_tracks, delete_track, export_gpx, ensure_trial_trees
-from db_users import upload_trial_owners, download_trial_owners, init_db, validate_photo_cache, list_users, get_current_user_uuid, set_current_user_uuid, load_current_user_profile, create_user_profile, get_active_user, fetch_users, create_user
+from db_users import upload_trial_owners, download_users, download_trial_owners, init_db, validate_photo_cache, list_users, get_current_user_uuid, set_current_user_uuid, load_current_user_profile, create_user_profile, get_active_user, fetch_users, create_user
 from load_mbtiles import SafeMBTilesMapSource, OSMSource, GoogleHybridSource, GoogleTerrainSource, BGCSource
 # from load_tif import GeoTiffOverlay
 from popups import LocationPopup, TrialFormPopup, DraggableButton, EditTrialPopup, EditLocationPopup, TrialFilterPopup, SaveTrackPopup, TrackManagerPopup, AssessmentPopup
@@ -1050,9 +1050,13 @@ class RootWidget(FloatLayout):
             
     def sync_with_server(self, instance):
         logger.info("🔄 Starting sync...")
+        download_users()
         download_trials()
         upload_trials()
         logger.info("✅ Trials synced.")
+        download_assessments()
+        upload_assessments()
+        logger.info("✅ Assessments synced.")
         self.load_trials()   # refresh markers
         download_trial_owners()
         upload_trial_owners()
@@ -1183,19 +1187,7 @@ class RootWidget(FloatLayout):
         # add some spacing before delete button
         #box.add_widget(Widget(size_hint_y=None, height=dp(20)))
 
-        # --- Delete button ---
-        delete_btn = Button(
-            text="Delete",
-            size_hint_y=None,
-            height=dp(80),
-            background_normal="",
-            background_color=(0.8, 0.2, 0.2, 0.9),
-        )
-        delete_btn.bind(
-            on_release=lambda *_: (self.confirm_delete_trial(marker, popup)) #, popup.dismiss(), self.delete_trial(marker)
-        )
-        box.add_widget(delete_btn)
-
+        
         # --- Assessment ---
         growth_button = Button(
             text="Add Assessment",
@@ -1208,6 +1200,20 @@ class RootWidget(FloatLayout):
             on_release=lambda *_: (popup.dismiss(), self.open_growth_popup(marker))
         )
         box.add_widget(growth_button)
+
+        # --- Delete button ---
+        delete_btn = Button(
+            text="Delete",
+            size_hint_y=None,
+            height=dp(40),
+            background_normal="",
+            background_color=(0.8, 0.2, 0.2, 0.9),
+        )
+        delete_btn.bind(
+            on_release=lambda *_: (self.confirm_delete_trial(marker, popup)) #, popup.dismiss(), self.delete_trial(marker)
+        )
+        box.add_widget(delete_btn)
+
 
         scroll = ScrollView(do_scroll_x=False)
         scroll.add_widget(box)
@@ -1330,20 +1336,20 @@ class RootWidget(FloatLayout):
         EditLocationPopup(trial_row=trial, on_save=_on_save, get_current_gps = self.get_current_gps).open()
         
     def open_growth_popup(self, marker):
-        #data = load_assessment(assessment_uuid)
-        ## need to get available assessment uuids for this trial
+        
         AssessmentPopup(
             marker=marker,
             existing=None,
             save_callback=self.save_assessment,
         ).open()
 
-    def save_assessment(self, marker, data):
+    def save_assessment(self, marker, data, direction):
         print("Saving assessment for trial:", marker.uuid)
         create_assessment(
             trial_uuid=marker.uuid,
             user_uuid=load_current_user_profile()["user_uuid"],
             grid_data=data,
+            direction=direction,
             trial_rating=None,
             notes=None
         )

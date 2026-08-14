@@ -146,3 +146,10 @@ class NativeNumericField(Widget):
     def on_parent(self, instance, parent):
         if parent is None:
             self.destroy()
+
+    def hide_native(self):
+        self.bridge.hide()
+
+    def show_native(self):
+        self.bridge.show()
+        self._update_frame()

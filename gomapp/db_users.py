@@ -7,6 +7,7 @@ import os
 import requests
 from gom_logger import logger
 from contextlib import contextmanager
+from utils import user_uuid
 
 @contextmanager
 def db_connection():
@@ -23,6 +24,21 @@ def db_connection():
 
     finally:
         conn.close()
+
+def column_exists(conn, table, column):
+
+    rows = conn.execute(
+        f"PRAGMA table_info({table})"
+    ).fetchall()
+
+    return any(row[1] == column for row in rows)
+
+def migrate_db(conn):
+    if not column_exists(conn, "trials", "grid_direction"):
+        conn.execute("""
+            ALTER TABLE trials
+            ADD COLUMN grid_direction TEXT
+        """)
 
 
 def init_db():
@@ -55,7 +71,8 @@ def init_db():
             assess_updated BOOLEAN DEFAULT 0, 
             growth_grid TEXT,
             block_name TEXT,
-            replicate_no INTEGER
+            replicate_no INTEGER,
+            grid_orientation TEXT
         )
     """)
     
@@ -104,7 +121,7 @@ def init_db():
     """)
 
     init_assessment_tables(c)
-    
+    migrate_db(conn)
     conn.commit()
     conn.close()
 
@@ -127,6 +144,7 @@ def init_assessment_tables(c):
         )
     """)
 
+    ## should really have a foreign key constrain to users table
     c.execute("""
         CREATE TABLE IF NOT EXISTS assessments (
             assessment_uuid TEXT PRIMARY KEY,
@@ -143,10 +161,7 @@ def init_assessment_tables(c):
 
             FOREIGN KEY(trial_uuid)
                 REFERENCES trials(uuid)
-                ON DELETE CASCADE,
-
-            FOREIGN KEY(user_uuid)
-                REFERENCES users(user_uuid)
+                ON DELETE CASCADE
         )
     """)
 
@@ -303,7 +318,7 @@ def create_user_profile(name, email, username):
     username = username.strip()
     name = name.strip()
     email = email.strip() if email else ""
-
+    download_users()  # Ensure local users table is up-to-date with server
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
@@ -326,8 +341,9 @@ def create_user_profile(name, email, username):
 
     else:
         # ➕ New user → create UUID + insert
+        namespace = uuid.UUID("username")
         profile = {
-            "user_uuid": str(uuid.uuid4()),
+            "user_uuid": user_uuid(username),
             "name": name,
             "email": email,
             "username": username,
@@ -349,6 +365,82 @@ def create_user_profile(name, email, username):
     # 🎯 Always set active user
     set_current_user_uuid(profile["user_uuid"])
     return profile
+
+## download gom_users from server and update local users table
+def download_users():
+
+    try:
+        response = requests.get(
+            f"{API_URL}/users",
+            timeout=30
+        )
+
+    except requests.RequestException as e:
+        print(
+            "User sync request failed: %s",
+            e
+        )
+        return False
+
+    if response.status_code != 200:
+        print(
+            "User sync failed. STATUS %s BODY %s",
+            response.status_code,
+            response.text
+        )
+        return False
+
+    try:
+        result = response.json()
+
+    except ValueError:
+        print(
+            "User sync returned invalid JSON: %s",
+            response.text
+        )
+        return False
+
+    if not result.get("success", False):
+        print(
+            "User sync rejected by server: %s",
+            result
+        )
+        return False
+
+    users = result.get("users", [])
+
+    with db_connection() as conn:
+
+        conn.executemany("""
+            INSERT INTO users (
+                user_uuid,
+                username,
+                name,
+                email
+            )
+            VALUES (?, ?, ?, ?)
+
+            ON CONFLICT(user_uuid)
+            DO UPDATE SET
+                username = excluded.username,
+                name = excluded.name,
+                email = excluded.email
+        """, [
+            (
+                user["user_uuid"],
+                user["username"],
+                user.get("name", ""),
+                user.get("email", "")
+            )
+            for user in users
+        ])
+
+    print(
+        "Synced %d user(s) to local database.",
+        len(users)
+    )
+
+    return True
     
 def get_active_user():
     prof = load_current_user_profile()

@@ -1,8 +1,10 @@
-from kivy.graphics import Color, RoundedRectangle
+from kivy.graphics import Color, RoundedRectangle, Ellipse
 from kivy.metrics import dp
 from kivy.uix.label import Label
 from kivy.uix.button import Button
 from kivy.uix.widget import Widget
+from kivy.properties import NumericProperty
+from kivy.clock import Clock
 import uuid
 
 class SectionHeader(Label):
@@ -179,4 +181,93 @@ class DragHandle(Widget):
             self.end_callback(dy)
 
         return True
-    
+
+
+GOM_USER_NAMESPACE = uuid.UUID(
+    "deed0c7c-2899-4a65-97bd-3076028e86ba"
+)
+
+def user_uuid(username):
+    """
+    Generate a UUID for a given username using a fixed namespace.
+    This ensures that the same username always produces the same UUID.
+    """
+
+    # Use a fixed namespace UUID for consistency
+    namespace = GOM_USER_NAMESPACE
+    return str(uuid.uuid5(namespace, username.strip().lower()))
+
+
+class PageDots(Widget):
+
+    page_count = NumericProperty(1)
+    current_page = NumericProperty(0)
+
+    def __init__(
+        self,
+        dot_size=dp(7),
+        spacing=dp(8),
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+
+        self.dot_size = dot_size
+        self.spacing = spacing
+
+        self.size_hint_y = None
+        self.height = dp(18)
+
+        self.bind(
+            pos=self._redraw,
+            size=self._redraw,
+            page_count=self._redraw,
+            current_page=self._redraw
+        )
+
+        Clock.schedule_once(
+            self._redraw,
+            0
+        )
+
+    def _redraw(self, *_):
+
+        self.canvas.clear()
+
+        if self.page_count <= 0:
+            return
+
+        total_width = (
+            self.page_count * self.dot_size
+            + (self.page_count - 1) * self.spacing
+        )
+
+        start_x = (
+            self.center_x
+            - total_width / 2
+        )
+
+        y = (
+            self.center_y
+            - self.dot_size / 2
+        )
+
+        with self.canvas:
+
+            for i in range(self.page_count):
+
+                if i == self.current_page:
+                    Color(1, 1, 1, 1)
+                else:
+                    Color(1, 1, 1, 0.3)
+
+                x = start_x + i * (
+                    self.dot_size + self.spacing
+                )
+
+                Ellipse(
+                    pos=(x, y),
+                    size=(
+                        self.dot_size,
+                        self.dot_size
+                    )
+                )

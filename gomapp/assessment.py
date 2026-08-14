@@ -9,10 +9,12 @@ from kivy.uix.label import Label
 from kivy.graphics import Color, RoundedRectangle, Line
 from kivy.uix.scrollview import ScrollView
 from kivy.clock import Clock
+import copy
 
-from utils import SectionHeader
+from utils import SectionHeader, PageDots, RoundedButton
 from config import damage_dict
 from numeric_entry import NativeNumericField
+from datetime import datetime
 
 class GrowthCell(Button):
 
@@ -123,18 +125,22 @@ class GrowthGrid(GridLayout):
     def __init__(self, existing=None, callback=None, **kwargs):
         super().__init__(rows=5, cols=5, spacing=4, padding=4, **kwargs)
         self.callback = callback
-        self.data = [
-            [
-                {
-                    "rating": existing[r][c] if existing else "Mis",
-                    "damage": list(),
-                    "height": None,
-                    "diameter": None
-                }
-                for c in range(5)
+        if existing is not None:
+            self.data = copy.deepcopy(existing)
+
+        else:
+            self.data = [
+                [
+                    {
+                        "rating": "Mis",
+                        "damage": [],
+                        "height": None,
+                        "diameter": None
+                    }
+                    for col in range(5)
+                ]
+                for row in range(5)
             ]
-            for r in range(5)
-        ]
         self.selected_row = 0
         self.selected_col = 0
 
@@ -155,6 +161,27 @@ class GrowthGrid(GridLayout):
                 self.add_widget(cell)
 
             self.cells.append(row)
+
+    def load_data(self, data):
+        self.data = copy.deepcopy(data)
+        for row in range(5):
+            for col in range(5):
+
+                self.cells[row][col].data = (
+                    self.data[row][col]
+                )
+
+                self.cells[row][col].update_cell()
+
+        if self.selected_row is not None:
+            self.cells[
+                self.selected_row
+            ][
+                self.selected_col
+            ].set_selected(False)
+
+        self.selected_row = 0
+        self.selected_col = 0
         
     def select(self, row, col):
         print(f"Selected cell: ({row}, {col})")
@@ -246,29 +273,29 @@ class AssessmentPanel(BoxLayout):
         # NAV
         # -------------------------------------------------------
 
-        nav = BoxLayout(
-            spacing=dp(10),
-            size_hint_y=None,
-            height=dp(44)
-        )
+        # nav = BoxLayout(
+        #     spacing=dp(10),
+        #     size_hint_y=None,
+        #     height=dp(44)
+        # )
 
-        prev_btn = Button(text="<- Previous")
-        prev_btn.bind(
-            on_release=lambda *_:
-            self.previous_callback()
-            if self.previous_callback else None
-        )
+        # prev_btn = Button(text="<- Previous")
+        # prev_btn.bind(
+        #     on_release=lambda *_:
+        #     self.previous_callback()
+        #     if self.previous_callback else None
+        # )
 
-        next_btn = Button(text="Next ->")
-        next_btn.bind(
-            on_release=lambda *_:
-            self.next_callback()
-            if self.next_callback else None
-        )
+        # next_btn = Button(text="Next ->")
+        # next_btn.bind(
+        #     on_release=lambda *_:
+        #     self.next_callback()
+        #     if self.next_callback else None
+        # )
 
-        nav.add_widget(prev_btn)
-        nav.add_widget(next_btn)
-        self.add_widget(nav)
+        # nav.add_widget(prev_btn)
+        # nav.add_widget(next_btn)
+        # self.add_widget(nav)
 
         # =======================================================
         # Rating card
@@ -312,7 +339,7 @@ class AssessmentPanel(BoxLayout):
             cols=2,
             spacing=dp(10),
             size_hint_y=None,
-            rows=2,
+            rows=1,
             row_force_default=True,
             row_default_height=dp(42)
         )
@@ -321,14 +348,12 @@ class AssessmentPanel(BoxLayout):
             minimum_height=measure_grid.setter("height")
         )
 
-        measure_grid.add_widget(Label(text="Height (cm)"))
-        measure_grid.add_widget(Label(text="DBH (cm)"))
-
         self.height_input = NativeNumericField(
             decimal=True,
             size_hint=(1, None),
             height=dp(42),
         )
+        self.height_input.placeholder = "Height (cm)"
 
         self.height_input.bind(focused=self.on_height)
 
@@ -339,13 +364,12 @@ class AssessmentPanel(BoxLayout):
             size_hint=(1, None),
             height=dp(42),
         )
-
+        self.diameter_input.placeholder = "Diameter (cm)"
         self.diameter_input.bind(focused=self.on_diameter)
 
         measure_grid.add_widget(self.diameter_input)
 
         measure_card.add_widget(measure_grid)
-        self.add_widget(measure_card)
 
         # =======================================================
         # Damage card
@@ -356,6 +380,7 @@ class AssessmentPanel(BoxLayout):
         self.damage_section = DamageSection(
             agents=damage_agents,
             change_callback=self.notify_change,
+            overlay_callback=self._damage_overlay_changed,
             size_hint_y=None
         )
 
@@ -366,6 +391,7 @@ class AssessmentPanel(BoxLayout):
         damage_card.add_widget(self.damage_section)
 
         self.add_widget(damage_card)
+        self.add_widget(measure_card)
 
         
 
@@ -409,6 +435,15 @@ class AssessmentPanel(BoxLayout):
     # ==========================================================
     # Event handlers
     # ==========================================================
+
+    def _damage_overlay_changed(self, is_open):
+        if is_open:
+            self.height_input.hide_native()
+            self.diameter_input.hide_native()
+
+        else:
+            self.height_input.show_native()
+            self.diameter_input.show_native()
 
     def on_rating(self, button):
 
@@ -481,7 +516,7 @@ class AssessmentPanel(BoxLayout):
         card = BoxLayout(
             orientation="vertical",
             spacing=dp(8),
-            padding=dp(10),
+            padding=dp(5),
             size_hint_y=None
         )
 
@@ -591,6 +626,7 @@ class DamageSection(BoxLayout):
     def __init__(self,
                  agents,
                  change_callback=None,
+                 overlay_callback=None,
                  **kwargs):
 
         super().__init__(
@@ -600,7 +636,7 @@ class DamageSection(BoxLayout):
         )
 
         self.change_callback = change_callback
-
+        self.overlay_callback = overlay_callback
         self.damage = []
 
         self.rows = []
@@ -613,6 +649,9 @@ class DamageSection(BoxLayout):
         )
 
         self.spinner.bind(text=self.add_damage)
+        self.spinner.bind(
+            is_open=self._spinner_open_changed
+        )
 
         self.add_widget(self.spinner)
 
@@ -669,3 +708,134 @@ class DamageSection(BoxLayout):
 
         if self.change_callback:
             self.change_callback()
+
+    def _spinner_open_changed(self, spinner, is_open):
+        if self.overlay_callback:
+            self.overlay_callback(is_open)
+
+class AssessmentNavigator(BoxLayout):
+
+    def __init__(
+        self,
+        previous_callback=None,
+        next_callback=None,
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+
+        self.previous_callback = previous_callback
+        self.next_callback = next_callback
+
+        self.orientation = "vertical"
+        self.size_hint_y = None
+        self.height = dp(58)
+        self.spacing = dp(2)
+
+        # --------------------------------------------------
+        # Header row
+        # --------------------------------------------------
+
+        header = BoxLayout(
+            size_hint_y=None,
+            height=dp(36)
+        )
+
+        self.previous_btn = RoundedButton(
+            text="<",
+            size_hint_x=None,
+            width=dp(50),
+        )
+
+        self.title_label = Label(
+            text="",
+            halign="center",
+            valign="middle"
+        )
+
+        self.next_btn = RoundedButton(
+            text=">",
+            size_hint_x=None,
+            width=dp(50),
+        )
+
+        self.previous_btn.bind(
+            on_release=self._previous
+        )
+
+        self.next_btn.bind(
+            on_release=self._next
+        )
+
+        header.add_widget(self.previous_btn)
+        header.add_widget(self.title_label)
+        header.add_widget(self.next_btn)
+
+        # --------------------------------------------------
+        # Page information / dots
+        # --------------------------------------------------
+
+        self.page_dots = PageDots(
+            size_hint_y=None,
+            height=dp(16)
+        )
+
+        self.add_widget(header)
+        self.add_widget(self.page_dots)
+
+    def _previous(self, *_):
+        if self.previous_callback:
+            self.previous_callback()
+
+    def _next(self, *_):
+        if self.next_callback:
+            self.next_callback()
+
+    def load_page(
+                self,
+                index,
+                n_saved,
+                assessment_date=None,
+                assessor = None,
+                ):
+        n_pages = n_saved + 1
+        is_new = index == n_saved
+        # --------------------------------------------------
+        # Title
+        # --------------------------------------------------
+
+        if is_new:
+            self.title_label.text = f"New Assessment ({assessor})"
+        else:
+            dt = datetime.fromisoformat(
+                assessment_date
+            )
+
+            self.title_label.text = f"{dt.strftime('%B %-d, %Y')} ({assessor})"
+
+        # --------------------------------------------------
+        # Navigation buttons
+        # --------------------------------------------------
+
+        self.previous_btn.disabled = (
+            index == 0
+        )
+
+        self.next_btn.disabled = (
+            index == n_pages - 1
+        )
+
+        # Make the final forward action obvious
+        if index == n_saved - 1:
+            self.next_btn.text = "+"
+        else:
+            self.next_btn.text = ">"
+
+        self.previous_btn.text = "<"
+
+        # --------------------------------------------------
+        # Page indicator
+        # --------------------------------------------------
+        self.page_dots.page_count = n_pages
+        self.page_dots.current_page = index
+
+        

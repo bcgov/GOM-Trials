@@ -1,8 +1,9 @@
+import uuid
+import copy
 import datetime
-
-from db_trials import get_most_recent_trial, add_trial_owner, get_replicate_no, get_trial_owners, get_trial_year_range
 from kivy.uix.popup import Popup
 from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.textinput import TextInput
 from kivy.uix.label import Label
 from kivy.uix.button import Button
@@ -22,9 +23,11 @@ from photos import IOSPhotoPicker
 from db_users import download_trial_owners
 from gom_logger import logger
 from utils import RoundedButton
-from assessment import AssessmentPanel, GrowthGrid
-
-import uuid
+from assessment import AssessmentPanel, GrowthGrid, AssessmentNavigator
+from assessment_db import get_trial_assessment_uuids, load_assessment, create_assessment, get_grid_direction
+from db_trials import get_most_recent_trial, add_trial_owner, get_replicate_no, get_trial_owners, get_trial_year_range
+from db_users import load_current_user_profile, get_active_user
+from numeric_entry import NativeNumericField
 
 SMR_OPTIONS = ["(Select)", "0 - Very Xeric", "1 - Xeric", "2 - Subxeric", "3 - Submesic", "4 - Mesic", "5 - Subhygric", "6 - Hygric", "7 - Subhydric", "8 - Hydric"]
 SNR_OPTIONS = ["(Select)", "A - Very Poor", "B - Poor", "C - Medium", "D - Rich", "E - Very Rich", "F - Saline/Alkaline"]
@@ -264,6 +267,7 @@ class TrialFormPopup(Popup):
         self.owner = owner
         self.block_name = block_name
         self.on_submit = on_submit
+        self.bind(on_dismiss=self.destroy)
 
         root = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(12))
 
@@ -289,11 +293,18 @@ class TrialFormPopup(Popup):
             form.add_widget(ti)
 
         self.species = Spinner(text="Species", values=[f"{k} - {v}" for k,v in SPECIES.items()], size_hint_y=None, height=dp(44))
-        self.replicate_no = TextInput(text = "1",hint_text="Replicate number", multiline=False, input_filter="int", size_hint_y=None, height=dp(44))
-        self.seedlings = TextInput(hint_text="Number of Seedlings", input_filter="int",
-                                   multiline=False, text_validate_unfocus = False, size_hint_y=None, height=dp(44))
+        self.species.bind(is_open=self._hide_fields)
+        self.replicate_no = NativeNumericField(decimal=False, size_hint=(1, None), height=dp(44))
+        self.replicate_no.text = "1"
+
+        self.seedlings = NativeNumericField(
+                    decimal=False,
+                    size_hint=(1, None),
+                    height=dp(44),
+                )
         self.seedlot = TextInput(text = self.prev_trial.get("seedlot", "") if self.prev_trial.get("seedlot") is not None else "", multiline=False, text_validate_unfocus = False, size_hint_y=None, height=dp(44))
-        self.spacing = TextInput(hint_text="Spacing (e.g. 2.0)", multiline=False, text_validate_unfocus = False, size_hint_y=None, height=dp(44))
+        self.spacing = NativeNumericField(decimal = True, size_hint_y=None, height=dp(44))
+        self.spacing.placeholder = "Spacing (m)"
         self.request_key = TextInput(text = self.prev_trial.get("request_key", "") if self.prev_trial.get("request_key") is not None else "", multiline=False, text_validate_unfocus = False, size_hint_y=None, height=dp(44))
         self.notes = TextInput(text="", hint_text="Notes (optional)", multiline=True, size_hint_y=None, height=dp(80))
 
@@ -378,6 +389,21 @@ class TrialFormPopup(Popup):
         root.add_widget(btn_row)
 
         self.content = root
+
+    def destroy(self, *_):
+        self.seedlings.destroy()
+        self.replicate_no.destroy()
+        self.spacing.destroy()
+
+    def _hide_fields(self, spinner, is_open):
+        if is_open:
+            self.seedlings.hide_native()
+            self.replicate_no.hide_native()
+            self.spacing.hide_native()
+        else:
+            self.seedlings.show_native()
+            self.replicate_no.show_native()
+            self.spacing.show_native()
 
     def update_spp_fields(self, *_):
         spp_code = self.species.text.split(" - ")[0] if self.species.text != "Species" else None
@@ -1075,8 +1101,23 @@ class AssessmentPopup(Popup):
 
         self.marker = marker
         self.save_callback = save_callback
+        self.title = ""
+        self.title_size = 0
+        self.separator_height = 0
 
-        self.title = "Tree Growth Assessment"
+        self.assessment_uuids = get_trial_assessment_uuids(
+            marker.uuid
+        )
+
+        self.grid_corner_direction = get_grid_direction(
+            self.marker.uuid
+        )
+
+        self.page_index = None
+        self.current_assessment_uuid = None
+
+        # Holds unsaved new-assessment work
+        self.new_assessment_data = None
 
         self.size_hint = (0.95, 0.95)
         self.auto_dismiss = False
@@ -1087,19 +1128,54 @@ class AssessmentPopup(Popup):
             spacing=dp(10),
             padding=dp(10)
         )
+        self.navigator = AssessmentNavigator(
+            previous_callback=self.previous_assessment,
+            next_callback=self.next_assessment
+        )
+
+        root.add_widget(self.navigator)
 
         # ------------------------------------------------------
         # Growth grid
         # ------------------------------------------------------
+        self.grid_area = FloatLayout(
+            size_hint=(1, None),
+            height=dp(330)
+        )
 
         self.grid = GrowthGrid(
             existing=existing,
             callback=self.tree_selected,
             size_hint=(1, None),
-            height=dp(320)
+            height=dp(320),
+            pos_hint={
+                "center_x": 0.5,
+                "top": 1
+            }
+        )
+        self.grid_area.add_widget(self.grid)
+        self.direction_spinner = Spinner(
+            text="Direction",
+            values=[
+                "N", "NE", "E", "SE",
+                "S", "SW", "W", "NW"
+            ],
+            size_hint=(None, None),
+            size=(dp(70), dp(36))
         )
 
-        root.add_widget(self.grid)
+        if self.grid_corner_direction:
+            self.direction_spinner.text = self.grid_corner_direction
+            self.direction_spinner.disabled = True
+
+        self.grid.bind(
+            pos=self.update_direction_position,
+            size=self.update_direction_position
+        )
+        self.grid_area.add_widget(
+            self.direction_spinner
+        )
+        root.add_widget(self.grid_area)
 
         # ------------------------------------------------------
         # Assessment panel
@@ -1133,30 +1209,182 @@ class AssessmentPopup(Popup):
         # Buttons
         # ------------------------------------------------------
 
-        button_row = BoxLayout(
+        self.button_row = BoxLayout(
             spacing=dp(10),
             size_hint_y=None,
             height=dp(44)
         )
 
-        cancel_btn = Button(text="Cancel")
-        cancel_btn.bind(on_release=lambda *_: self.dismiss())
+        self.cancel_btn = Button(text="Cancel")
+        self.cancel_btn.bind(on_release=lambda *_: self.dismiss())
 
-        save_btn = Button(
+        self.save_btn = Button(
             text="Save Assessment",
             background_normal="",
             background_color=(0.2, 0.6, 0.2, 1)
         )
 
-        save_btn.bind(on_release=self.save)
+        self.save_btn.bind(on_release=self.save)
 
-        button_row.add_widget(cancel_btn)
-        button_row.add_widget(save_btn)
+        self.close_btn = Button(text="Close")
+        self.close_btn.bind(on_release=lambda *_: self.dismiss())
 
-        root.add_widget(button_row)
+        root.add_widget(self.button_row)
 
         self.content = root
 
+        ## choose initial page
+        if self.assessment_uuids:
+            # Most recent saved assessment
+            initial_page = len(self.assessment_uuids) - 1
+        else:
+            # No assessments: New Assessment page
+            initial_page = 0
+
+        self.load_page(initial_page)
+
+    def load_page(self, index):
+
+        n_saved = len(self.assessment_uuids)
+
+
+        if index < 0 or index > n_saved:
+            return
+
+        # --------------------------------------------------
+        # Preserve unsaved new-assessment work
+        # --------------------------------------------------
+
+        if self.page_index == n_saved:
+            self.new_assessment_data = copy.deepcopy(
+                self.grid.data
+            )
+
+        # --------------------------------------------------
+        # Reset UI
+        # --------------------------------------------------
+        self.hide_panel()
+
+        self.page_index = index
+
+        # --------------------------------------------------
+        # Historical assessment
+        # --------------------------------------------------
+
+        if index < n_saved:
+
+            assessment_uuid = self.assessment_uuids[index]
+
+            assessment = load_assessment(
+                assessment_uuid
+            )
+            self.navigator.load_page(
+                index=index,
+                n_saved=n_saved,
+                assessment_date=assessment["assessment_date"],
+                assessor=assessment["username"]
+            )
+
+            self.current_assessment_uuid = assessment_uuid
+
+            self.grid.load_data(
+                assessment["trees"]
+            )
+
+            #self.panel.set_read_only(True)
+            self.update_buttons(read_only=True)
+
+
+        # --------------------------------------------------
+        # New assessment
+        # --------------------------------------------------
+
+        else:
+
+            self.current_assessment_uuid = None
+            prof = load_current_user_profile()
+
+            if self.new_assessment_data is None:
+                self.new_assessment_data = (
+                    self.make_new_assessment_data()
+                )
+
+            self.navigator.load_page(
+                index=index,
+                n_saved=n_saved,
+                assessor=prof["username"]
+            )
+
+            self.grid.load_data(
+                self.new_assessment_data
+            )
+
+            self.update_buttons(read_only=False)
+
+    def update_direction_position(self, *_):
+        self.direction_spinner.pos = (
+            self.grid.x,
+            self.grid.y - dp(40)
+        )
+        self.grid_area.height = (
+            self.grid.height + dp(40)
+        )
+
+    def update_buttons(self, read_only):
+        self.button_row.clear_widgets()
+        if read_only:
+            # Historical assessment
+            self.button_row.add_widget(
+                self.close_btn
+            )
+
+        else:
+            # New assessment
+            self.button_row.add_widget(
+                self.cancel_btn
+            )
+            self.button_row.add_widget(
+                self.save_btn
+            )
+
+    def make_new_assessment_data(self):
+        data = self.make_empty_growth_grid()
+
+        if not self.assessment_uuids:
+            return data
+
+        latest_uuid = self.assessment_uuids[-1]
+
+        previous = load_assessment(
+            latest_uuid
+        )["trees"]
+
+        for row in range(5):
+            for col in range(5):
+
+                data[row][col]["rating"] = (
+                    previous[row][col]["rating"]
+                )
+
+        return data
+
+    def make_empty_growth_grid(self, rows=5, cols=5):
+        """
+        Create a fresh growth-assessment data structure.
+        """
+
+        return [
+            [
+                {
+                    "rating": "Mis",
+                    "damage": [],
+                    "height": None,
+                    "diameter": None
+                }
+                for col in range(cols)
+            ]
+            for row in range(rows)
+        ]
 
     def show_panel(self):
         if self.panel_container.height > 0:
@@ -1169,7 +1397,7 @@ class AssessmentPopup(Popup):
             self.height
             - button_height
             - spacing
-            - dp(380)
+            - dp(500)
         )
 
         target_grid = max(target_grid, dp(180))
@@ -1181,8 +1409,8 @@ class AssessmentPopup(Popup):
         ).start(self.panel_container)
 
         Animation(
-            height=dp(260),
-            width=dp(260),
+            height=target_grid,
+            width=target_grid,
             d=0.25,
             t="out_quad"
         ).start(self.grid)
@@ -1213,14 +1441,89 @@ class AssessmentPopup(Popup):
     # ==========================================================
 
     def save(self, *_):
-
+        direction = self.direction_spinner.text
         if self.save_callback:
             self.save_callback(
                 self.marker,
-                self.grid.data
+                self.grid.data,
+                direction
             )
 
         self.dismiss()
 
     def _on_dismiss(self, *_):
         self.panel.destroy()
+
+    # ==========================================================
+    # Gesture handling
+    # ==========================================================
+    def on_touch_down(self, touch):
+        if self.grid.collide_point(*touch.pos):
+            touch.ud["assessment_swipe_x"] = touch.x
+            touch.ud["assessment_swipe_y"] = touch.y
+
+        return super().on_touch_down(touch)
+    
+    def on_touch_up(self, touch):
+        if "assessment_swipe_x" in touch.ud:
+
+            dx = touch.x - touch.ud["assessment_swipe_x"]
+            dy = touch.y - touch.ud["assessment_swipe_y"]
+
+            # Horizontal gesture rather than vertical scroll
+            if abs(dx) > dp(60) and abs(dx) > abs(dy) * 1.5:
+
+                if dx < 0:
+                    self.next_assessment()
+                else:
+                    self.previous_assessment()
+
+                return True
+
+        return super().on_touch_up(touch)
+    
+    def next_assessment(self):
+        max_index = len(self.assessment_uuids)
+        if self.page_index < max_index:
+            self.load_page(
+                self.page_index + 1
+            )
+
+    def previous_assessment(self):
+        if self.page_index > 0:
+            self.load_page(
+                self.page_index - 1
+            )
+
+    def hide_panel(self, animate=True):
+
+        # # Dismiss native numeric fields / keyboard
+        # self.panel.height_input.bridge.resignFirstResponderField()
+        # self.panel.diameter_input.bridge.resignFirstResponderField()
+
+        # Restore grid size
+        target_grid = dp(320)
+
+        if animate:
+
+            Animation(
+                height=0,
+                d=0.20,
+                t="out_quad"
+            ).start(self.panel_container)
+
+            Animation(
+                height=target_grid,
+                width=target_grid,
+                d=0.20,
+                t="out_quad"
+            ).start(self.grid)
+
+        else:
+
+            Animation.cancel_all(self.panel_container)
+            Animation.cancel_all(self.grid)
+
+            self.panel_container.height = 0
+            self.grid.height = target_grid
+            self.grid.width = target_grid
