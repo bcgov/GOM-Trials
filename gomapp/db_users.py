@@ -120,6 +120,17 @@ def init_db():
         )
     """)
 
+    c.execute("""
+            CREATE TABLE IF NOT EXISTS track_logs (
+                uuid TEXT PRIMARY KEY,
+                name TEXT,
+                created DATETIME,
+                distance REAL,
+                point_count INTEGER,
+                track_json TEXT
+            )
+            """)
+
     init_assessment_tables(c)
     migrate_db(conn)
     conn.commit()
@@ -191,8 +202,7 @@ def init_assessment_tables(c):
             damage_uuid TEXT PRIMARY KEY,
             tree_assessment_uuid TEXT NOT NULL,
             damage_code TEXT NOT NULL,
-            severity INTEGER NOT NULL
-                CHECK(severity BETWEEN 1 AND 3),
+            severity INTEGER,
 
             UNIQUE(tree_assessment_uuid, damage_code),
 
@@ -200,6 +210,61 @@ def init_assessment_tables(c):
                 REFERENCES tree_assessments(tree_assessment_uuid)
                 ON DELETE CASCADE
         )
+    """)
+
+    c.execute("""
+        CREATE VIEW IF NOT EXISTS assessment_performance AS
+        WITH scored AS (
+            SELECT
+                a.assessment_uuid,
+                a.trial_uuid,
+                a.assessment_date,
+
+                CASE ta.rating
+                    WHEN 'D' THEN 0
+                    WHEN 'P' THEN 1
+                    WHEN 'F' THEN 2
+                    WHEN 'G' THEN 3
+                    WHEN 'E' THEN 4
+                    ELSE NULL
+                END AS score
+
+            FROM assessments a
+            JOIN tree_assessments ta
+            ON a.assessment_uuid = ta.assessment_uuid
+        ),
+
+        summarized AS (
+            SELECT
+                assessment_uuid,
+                trial_uuid,
+                assessment_date,
+                AVG(score) AS mean_score,
+                COUNT(score) AS trees_scored
+            FROM scored
+            GROUP BY
+                assessment_uuid,
+                trial_uuid,
+                assessment_date
+        )
+
+        SELECT
+            assessment_uuid,
+            trial_uuid,
+            assessment_date,
+            mean_score,
+            trees_scored,
+
+            CASE
+                WHEN mean_score IS NULL THEN NULL
+                WHEN mean_score >= 3.5 THEN 'Excellent'
+                WHEN mean_score >= 2.5 THEN 'Good'
+                WHEN mean_score >= 1.5 THEN 'Fair'
+                WHEN mean_score >= 0.5 THEN 'Poor'
+                ELSE 'Fail'
+            END AS performance
+
+        FROM summarized;
     """)
 
     # Useful lookup indexes

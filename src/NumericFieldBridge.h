@@ -29,6 +29,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (BOOL)becomeFirstResponderField;
 - (BOOL)resignFirstResponderField;
+- (void)setReadOnly:(BOOL)readOnly;
 
 // State
 - (BOOL)isFirstResponder;

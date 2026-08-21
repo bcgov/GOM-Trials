@@ -96,7 +96,7 @@ class GrowthCell(Button):
 
         if len(self.data["damage"]) > 0:
             damage_summary =  "".join(
-                                f"{damage_dict[d['agent']]}{d['severity']}"
+                                f"{damage_dict.get(d['agent'],'')}{d['severity'] or ''}"
                                 for d in self.data["damage"]
                                 )
 
@@ -261,41 +261,13 @@ class AssessmentPanel(BoxLayout):
         self.bind(minimum_height=self.setter("height"))
 
         self.tree = None
-
+        self.read_only = False
         self.previous_callback = previous_callback
         self.next_callback = next_callback
         self.change_callback = change_callback
 
         if damage_agents is None:
             damage_agents = damage_dict.keys()
-
-        # -------------------------------------------------------
-        # NAV
-        # -------------------------------------------------------
-
-        # nav = BoxLayout(
-        #     spacing=dp(10),
-        #     size_hint_y=None,
-        #     height=dp(44)
-        # )
-
-        # prev_btn = Button(text="<- Previous")
-        # prev_btn.bind(
-        #     on_release=lambda *_:
-        #     self.previous_callback()
-        #     if self.previous_callback else None
-        # )
-
-        # next_btn = Button(text="Next ->")
-        # next_btn.bind(
-        #     on_release=lambda *_:
-        #     self.next_callback()
-        #     if self.next_callback else None
-        # )
-
-        # nav.add_widget(prev_btn)
-        # nav.add_widget(next_btn)
-        # self.add_widget(nav)
 
         # =======================================================
         # Rating card
@@ -325,10 +297,6 @@ class AssessmentPanel(BoxLayout):
             rating_row.add_widget(btn)
 
         rating_card.add_widget(rating_row)
-
-        self.add_widget(rating_card)
-
-
         # =======================================================
         # Measurements card
         # =======================================================
@@ -354,8 +322,8 @@ class AssessmentPanel(BoxLayout):
             height=dp(42),
         )
         self.height_input.placeholder = "Height (cm)"
-
         self.height_input.bind(focused=self.on_height)
+        self.height_input.hide_native()
 
         measure_grid.add_widget(self.height_input)
 
@@ -364,8 +332,9 @@ class AssessmentPanel(BoxLayout):
             size_hint=(1, None),
             height=dp(42),
         )
-        self.diameter_input.placeholder = "Diameter (cm)"
+        self.diameter_input.placeholder = "DBH (cm)"
         self.diameter_input.bind(focused=self.on_diameter)
+        self.height_input.hide_native()
 
         measure_grid.add_widget(self.diameter_input)
 
@@ -390,10 +359,9 @@ class AssessmentPanel(BoxLayout):
 
         damage_card.add_widget(self.damage_section)
 
-        self.add_widget(damage_card)
         self.add_widget(measure_card)
-
-        
+        self.add_widget(rating_card)
+        self.add_widget(damage_card)
 
     # ==========================================================
     # Loading
@@ -435,6 +403,14 @@ class AssessmentPanel(BoxLayout):
     # ==========================================================
     # Event handlers
     # ==========================================================
+
+    def hide_native(self):
+        self.height_input.hide_native()
+        self.diameter_input.hide_native()
+
+    def show_native(self):
+        self.height_input.show_native()
+        self.diameter_input.show_native()
 
     def _damage_overlay_changed(self, is_open):
         if is_open:
@@ -510,6 +486,15 @@ class AssessmentPanel(BoxLayout):
     def destroy(self):
         self.height_input.destroy()
         self.diameter_input.destroy()
+
+    def set_read_only(self, read_only=True):
+        self.read_only = read_only
+        for btn in self.rating_buttons.values():
+            btn.disabled = read_only
+
+        self.damage_section.set_read_only(read_only)
+        self.height_input.set_read_only(read_only)
+        self.diameter_input.set_read_only(read_only)
 
     def make_card(self, title):
 
@@ -595,15 +580,22 @@ class DamageRow(BoxLayout):
 
             self.add_widget(btn)
 
-        delete_btn = Button(
+        self.delete_btn = Button(
             text="DEL",
             size_hint_x=None,
             width=dp(40)
         )
 
-        delete_btn.bind(on_release=self.remove)
+        self.delete_btn.bind(on_release=self.remove)
 
-        self.add_widget(delete_btn)
+        self.add_widget(self.delete_btn)
+
+    def set_read_only(self, read_only=False):
+        for btn in self.buttons.values():
+            btn.disabled = read_only
+
+        self.delete_btn.disabled = read_only
+        self.delete_btn.opacity = 0 if read_only else 1
 
     def set_severity(self, button):
 
@@ -637,6 +629,7 @@ class DamageSection(BoxLayout):
 
         self.change_callback = change_callback
         self.overlay_callback = overlay_callback
+        self.read_only = False
         self.damage = []
 
         self.rows = []
@@ -667,6 +660,16 @@ class DamageSection(BoxLayout):
         for d in self.damage:
             self._add_row(d)
 
+    def set_read_only(self, read_only=False):
+        self.read_only = read_only
+
+        # Prevent adding new damage agents
+        self.spinner.disabled = read_only
+
+        # Existing damage rows
+        for row in self.rows:
+            row.set_read_only(read_only)
+
     def add_damage(self, spinner, value):
 
         if value == "Add damage agent...":
@@ -693,7 +696,7 @@ class DamageSection(BoxLayout):
             remove_callback=self.remove_row,
             change_callback=self.change_callback
         )
-
+        row.set_read_only(self.read_only)
         self.rows.append(row)
 
         self.add_widget(row, index = 1)

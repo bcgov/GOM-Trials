@@ -253,7 +253,7 @@ def load_assessment(assessment_uuid):
             ]
 
             grid[row][col]["damage"].append({
-                "agent": DAMAGE_NAMES[damage_code],
+                "agent": DAMAGE_NAMES.get(damage_code, ""),
                 "severity": severity
             })
 
@@ -714,7 +714,7 @@ def save_downloaded_assessment(assessment):
                 tree["tree_assessment_uuid"],
                 assessment_uuid,
                 tree["tree_uuid"],
-                tree.get("rating"),
+                tree.get("rating") or "Mis",
                 tree.get("height"),
                 tree.get("diameter")
             ))

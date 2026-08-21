@@ -19,7 +19,7 @@ from kivy.uix.gridlayout import GridLayout
 from kivy.core.window import Window
 from kivy.uix.widget import Widget
 from kivy.metrics import dp
-from kivy.graphics import Color, Rectangle
+from kivy.graphics import Color, Rectangle, Ellipse
 from kivy_garden.mapview.view import MarkerMapLayer
 from kivy.utils import platform
 from kivy.uix.filechooser import FileChooserListView
@@ -52,7 +52,7 @@ import sys
 
 
 from assessment_db import create_assessment, download_assessments, upload_assessments
-from config import DB_PATH, API_URL, USER_RE, icon_dict
+from config import DB_PATH, API_URL, USER_RE, icon_dict, ASSESSMENT_COLOURS
 from db_trials import upload_trials, download_trials, update_trial, update_trial_location, get_trial_row, get_photos_for_trial, upload_photos, get_trial_year_range, get_trial_owners, save_track, load_track, list_tracks, delete_track, export_gpx, ensure_trial_trees
 from db_users import upload_trial_owners, download_users, download_trial_owners, init_db, validate_photo_cache, list_users, get_current_user_uuid, set_current_user_uuid, load_current_user_profile, create_user_profile, get_active_user, fetch_users, create_user
 from load_mbtiles import SafeMBTilesMapSource, OSMSource, GoogleHybridSource, GoogleTerrainSource, BGCSource
@@ -158,7 +158,7 @@ class LoginScreen(Screen):
         form.add_widget(title)
 
         subtitle = Label(
-            text="Select a user or create a new profile.",
+            text="Select a planter (user) or create a new profile.",
             size_hint_y=None,
             height=dp(28),
             halign="center",
@@ -169,7 +169,7 @@ class LoginScreen(Screen):
 
         # 🔽 Existing user dropdown
         self.user_spinner = Spinner(
-            text="Select existing user",
+            text="Select existing planter",
             size_hint_y=None,
             height=dp(48)
         )
@@ -211,7 +211,7 @@ class LoginScreen(Screen):
         
     def on_pre_enter(self, *args):
         # Reset spinner
-        self.user_spinner.text = "Select existing user"
+        self.user_spinner.text = "Select existing planter"
 
         # Clear form fields
         self.name_in.text = ""
@@ -227,7 +227,7 @@ class LoginScreen(Screen):
     def on_user_selected(self, spinner, text):
 
         # Ignore placeholder value
-        if text == "Select existing user":
+        if text == "Select existing planter":
             return
 
         # Find matching user
@@ -256,9 +256,9 @@ class LoginScreen(Screen):
             self.user_spinner.values = usernames
 
         except Exception as e:
-            print("Failed to fetch users:", e)
+            print("Failed to fetch planters:", e)
             self.users = []
-            self.err.text = "Could not load users (offline mode)"
+            self.err.text = "Could not load planters (offline mode)"
             
     def on_continue(self, *_):
         app = App.get_running_app()
@@ -266,7 +266,7 @@ class LoginScreen(Screen):
         selected_username = self.user_spinner.text
 
         # ✅ CASE 1: Existing user selected
-        if selected_username != "Select existing user":
+        if selected_username != "Select existing planter":
             user = next(u for u in self.users if u["username"] == selected_username)
 
             profile = create_user_profile(
@@ -323,10 +323,6 @@ class LoginScreen(Screen):
         self.err.text = ""
         TreeApp.instance.get_root_widget().on_user_switched() ##redraw for new user
         self.manager.current = "map"
-
-
-
-
     
 class RootWidget(FloatLayout):
     def __init__(self, **kwargs):
@@ -419,7 +415,7 @@ class RootWidget(FloatLayout):
         # self.drawer.add_widget(header)
         
         self.active_user_lbl = Label(
-            text="Active User: (none)",
+            text="Active Planter: (none)",
             size_hint=(None, None),
             height=dp(28),
             width=dp(260),
@@ -427,6 +423,7 @@ class RootWidget(FloatLayout):
             valign="middle",
         )
         self.active_user_lbl.bind(size=lambda inst, *_: setattr(inst, "text_size", inst.size))
+        self.drawer.add_widget(Widget())
         self.drawer.add_widget(self.active_user_lbl)
         self.refresh_active_user_label()
 
@@ -477,7 +474,7 @@ class RootWidget(FloatLayout):
         self.finish_button.height = 0
         add_menu_item("View Saved Tracks", self.view_saved_tracks)
         self.drawer.add_widget(general_label)
-        add_menu_item("Change user", self.change_user_popup)
+        add_menu_item("Change Planter", self.change_user_popup)
         
         self.map_style_spinner = Spinner(
             text="Map Type",
@@ -668,12 +665,12 @@ class RootWidget(FloatLayout):
         try:
             prof = load_current_user_profile()  # your DB-backed helper
             if prof:
-                self.active_user_lbl.text = f"Active User: {prof['username']}"
+                self.active_user_lbl.text = f"Active Planter: {prof['username']}"
             else:
-                self.active_user_lbl.text = "Active User: (none)"
+                self.active_user_lbl.text = "Active Planter: (none)"
         except Exception as e:
             print("⚠️ Could not refresh active user label:", e)
-            self.active_user_lbl.text = "Active User: (error)"
+            self.active_user_lbl.text = "Active Planter: (error)"
         
     @mainthread
     def set_marker(self, lat, lon, elev, acc):
@@ -758,7 +755,7 @@ class RootWidget(FloatLayout):
 
         root = BoxLayout(orientation="vertical", spacing=10, padding=10)
 
-        root.add_widget(Label(text="Select a user", size_hint_y=None, height=40))
+        root.add_widget(Label(text="Select a planter", size_hint_y=None, height=dp(40)))
 
         scroll = ScrollView()
         user_list = BoxLayout(orientation="vertical", spacing=8, size_hint_y=None)
@@ -923,7 +920,8 @@ class RootWidget(FloatLayout):
             spacing=data["spacing"],
             lat=data["lat"],
             lon=data["lon"],
-            year=datetime.datetime.now().strftime("%Y")
+            year=datetime.datetime.now().strftime("%Y"),
+            assessed=False
         )
         
         
@@ -946,51 +944,81 @@ class RootWidget(FloatLayout):
         try:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
+
             query = """
-            SELECT
-                uuid,
-                user_id,
-                id,
-                species,
-                seedlings,
-                seedlot,
-                spacing,
-                lat,
-                lon,
-                strftime('%Y-%m', timestamp) AS year
-            FROM trials
-            WHERE 1=1
-            """
+                    SELECT
+                        t.uuid,
+                        t.user_id,
+                        t.id,
+                        t.species,
+                        t.seedlings,
+                        t.seedlot,
+                        t.spacing,
+                        t.lat,
+                        t.lon,
+                        strftime('%Y-%m', t.timestamp) AS year,
+                        ap.performance
+                    FROM trials t
+
+                    LEFT JOIN assessment_performance ap
+                    ON ap.assessment_uuid = (
+                        SELECT ap2.assessment_uuid
+                        FROM assessment_performance ap2
+                        WHERE ap2.trial_uuid = t.uuid
+                        ORDER BY ap2.assessment_date DESC
+                        LIMIT 1
+                    )
+
+                    WHERE 1=1
+                """
 
             params = []
-            
+
             if filters:
                 if not filters["all_years"]:
                     query += """
-                        AND CAST(strftime('%Y', timestamp) AS INTEGER)
-                            BETWEEN ? AND ?
+                        AND CAST(
+                            strftime('%Y', t.timestamp)
+                            AS INTEGER
+                        ) BETWEEN ? AND ?
                     """
+
                     params.extend([
                         filters["year_from"],
                         filters["year_to"]
                     ])
 
                 if not filters["all_owners"]:
-                    query += " AND trial_owner = ?"
-                    params.append(filters["owner"])
+                    query += """
+                        AND t.trial_owner = ?
+                    """
 
-                query += " ORDER BY timestamp DESC"
+                    params.append(
+                        filters["owner"]
+                    )
+
+            query += """
+                ORDER BY t.timestamp DESC
+            """
 
             c.execute(query, params)
             rows = c.fetchall()
+
             conn.close()
 
-            logger.info(f"📥 Background loaded {len(rows)} trials")
+            logger.info(
+                f"📥 Background loaded {len(rows)} trials"
+            )
 
-            # schedule adding them gradually
-            Clock.schedule_once(lambda dt: self._add_trial_markers_generator(rows))
+            Clock.schedule_once(
+                lambda dt:
+                    self._add_trial_markers_generator(rows)
+            )
+
         except Exception as e:
-            logger.warning(f"⚠️ Background trial load error: {e}")
+            logger.warning(
+                f"⚠️ Background trial load error: {e}"
+            )
 
     def _add_trial_markers_generator(self, rows, batch_size=50):
         """
@@ -1004,9 +1032,9 @@ class RootWidget(FloatLayout):
             end = min(idx + batch_size, total)
 
             for i in range(idx, end):
-                uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon, year = rows[i]
+                uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon, year, assessed = rows[i]
                 if uuid not in self.trial_marker_uuids:
-                    self.add_trial_marker(uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon, year)
+                    self.add_trial_marker(uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon, year, assessed)
 
             idx = end
             #print(f"📍 Added {end} / {total}")
@@ -1026,27 +1054,6 @@ class RootWidget(FloatLayout):
 
         # Load all rows in background
         Thread(target=self._load_trials_in_background, daemon=True).start()
-
-
-    def load_trials(self):
-        """Load all saved trials from SQLite and show them as markers."""
-        try:
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute("SELECT uuid, user_id, id, species, seedlings, seedlot, spacing, lat, lon, strftime('%Y-%m', timestamp) AS year FROM trials")
-            rows = c.fetchall()
-            conn.close()
-
-            logger.info(f"📍 Loaded {len(rows)} trials from DB")
-
-            for row in rows:
-                uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon, year = row
-                if uuid not in self.trial_marker_uuids:
-                    self.add_trial_marker(uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon, year)
-                    
-
-        except Exception as e:
-            logger.warning(f"⚠️ Error loading trials: {e}")
             
     def sync_with_server(self, instance):
         logger.info("🔄 Starting sync...")
@@ -1057,24 +1064,26 @@ class RootWidget(FloatLayout):
         download_assessments()
         upload_assessments()
         logger.info("✅ Assessments synced.")
-        self.load_trials()   # refresh markers
+        Thread(target=self._load_trials_in_background, daemon=True).start()
         download_trial_owners()
         upload_trial_owners()
         upload_photos()
         logger.info("✅ Sync complete")
 
     
-    def add_trial_marker(self, uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon, year):
+    def add_trial_marker(self, uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon, year, performance=None):
         """Create a lightweight marker which builds its popup only on tap."""
-        is_mine = (get_active_user()["username"] == user_id)
-        #icon = "user_icon.png" if is_mine else "gps_purple.png"
         icon = icon_dict.get(species.lower(), "GoM_glass.png")
-        # icon = "Fd_icon16.png" if species.lower() in ['fd','fdi','fdc'] else "user_icon.png"
-
 
         marker = MapMarkerPopup(lat=lat, lon=lon, source=icon)
         marker.uuid = uuid
         marker.trial_id = trial_id
+
+        with marker.canvas.before:
+            marker.assessment_colour = Color(
+                0, 0, 0, 0
+            )
+            marker.assessment_circle = Ellipse()
 
         # Store only the bare data needed to build the popup later
         marker.trial_data = {
@@ -1091,10 +1100,33 @@ class RootWidget(FloatLayout):
 
         # Build popup lazily on tap
         marker.bind(on_release=lambda instance: self.open_trial_popup(instance))
+        marker.bind(
+            pos=self.update_assessment_circle,
+            size=self.update_assessment_circle
+        )
+
+        self.update_assessment_circle(marker)
+        colour = ASSESSMENT_COLOURS.get(
+            performance,
+            (0, 0, 0, 0)
+        )
+        marker.assessment_colour.rgba = colour
 
         self.mapview.add_marker(marker)
         self.trial_markers.append(marker)
         self.trial_marker_uuids.add(uuid)
+
+    def update_assessment_circle(self, instance, *_):
+        padding = dp(4)
+        instance.assessment_circle.pos = (
+            instance.x - padding,
+            instance.y - padding
+        )
+
+        instance.assessment_circle.size = (
+            instance.width + padding * 2,
+            instance.height + padding * 2
+        )
         
     def get_trials_in_bounds(self, bbox):
         min_lat, min_lon, max_lat, max_lon = bbox
@@ -1124,7 +1156,7 @@ class RootWidget(FloatLayout):
 
         # --- Info text ---
         info_text = (
-            f"[b]User:[/b] {d['user_id']}\n"
+            f"[b]Planter:[/b] {d['user_id']}\n"
             f"[b]Species:[/b] {d['species']}\n"
             f"[b]Seedlings:[/b] {d['seedlings']}\n"
             f"[b]Seedlot:[/b] {d['seedlot']}\n"
@@ -1433,7 +1465,7 @@ class TreeApp(App):
         Clock.schedule_once(self.start_gps, 1.0)
         
         if self.root.current == "map":
-            app = TreeApp.instance.get_root_widget().load_trials()
+            TreeApp.instance.get_root_widget()._load_trials_in_background()
 
         
     def get_root_widget(self):

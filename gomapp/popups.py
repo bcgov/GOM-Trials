@@ -1175,6 +1175,20 @@ class AssessmentPopup(Popup):
         self.grid_area.add_widget(
             self.direction_spinner
         )
+
+        self.copy_previous_btn = RoundedButton(
+            text="Copy Previous",
+            size_hint=(None, None),
+            size=(dp(130), dp(36))
+        )
+
+        self.grid_area.add_widget(
+            self.copy_previous_btn
+        )
+
+        self.copy_previous_btn.bind(
+            on_release=self.copy_previous_assessment
+        )
         root.add_widget(self.grid_area)
 
         # ------------------------------------------------------
@@ -1274,7 +1288,7 @@ class AssessmentPopup(Popup):
         if index < n_saved:
 
             assessment_uuid = self.assessment_uuids[index]
-
+            self.copy_previous_btn.disabled = True
             assessment = load_assessment(
                 assessment_uuid
             )
@@ -1290,8 +1304,7 @@ class AssessmentPopup(Popup):
             self.grid.load_data(
                 assessment["trees"]
             )
-
-            #self.panel.set_read_only(True)
+            self.panel.set_read_only(True)
             self.update_buttons(read_only=True)
 
 
@@ -1303,6 +1316,7 @@ class AssessmentPopup(Popup):
 
             self.current_assessment_uuid = None
             prof = load_current_user_profile()
+            self.copy_previous_btn.disabled = (n_saved == 0)
 
             if self.new_assessment_data is None:
                 self.new_assessment_data = (
@@ -1318,12 +1332,16 @@ class AssessmentPopup(Popup):
             self.grid.load_data(
                 self.new_assessment_data
             )
-
+            self.panel.set_read_only(False)
             self.update_buttons(read_only=False)
 
     def update_direction_position(self, *_):
         self.direction_spinner.pos = (
             self.grid.x,
+            self.grid.y - dp(40)
+        )
+        self.copy_previous_btn.pos = (
+            self.grid.right - self.copy_previous_btn.width,
             self.grid.y - dp(40)
         )
         self.grid_area.height = (
@@ -1346,6 +1364,30 @@ class AssessmentPopup(Popup):
             self.button_row.add_widget(
                 self.save_btn
             )
+
+    def copy_previous_assessment(self, *_):
+        if not self.assessment_uuids:
+            return
+
+        latest_uuid = self.assessment_uuids[-1]
+
+        previous = load_assessment(
+            latest_uuid
+        )
+
+        if previous is None:
+            return
+
+        self.new_assessment_data = copy.deepcopy(
+            previous["trees"]
+        )
+
+        self.grid.load_data(
+            self.new_assessment_data
+        )
+
+        #self.grid.clear_selection()
+        #self.hide_panel(animate=False)
 
     def make_new_assessment_data(self):
         data = self.make_empty_growth_grid()
@@ -1389,7 +1431,8 @@ class AssessmentPopup(Popup):
     def show_panel(self):
         if self.panel_container.height > 0:
             return
-        
+
+        self.panel.show_native()
         button_height = dp(44)
         spacing = dp(30)      # padding + spacing
 
@@ -1503,7 +1546,7 @@ class AssessmentPopup(Popup):
 
         # Restore grid size
         target_grid = dp(320)
-
+        self.panel.hide_native()
         if animate:
 
             Animation(

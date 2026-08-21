@@ -132,6 +132,16 @@
     return [self.textField resignFirstResponder];
 }
 
+- (void)setReadOnly:(BOOL)readOnly
+{
+    self.textField.userInteractionEnabled = !readOnly;
+
+    if (readOnly)
+    {
+        [self.textField resignFirstResponder];
+    }
+}
+
 - (void)setFrameX:(CGFloat)x
                 y:(CGFloat)y
             width:(CGFloat)width

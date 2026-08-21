@@ -21,3 +21,11 @@ icon_dict = {
 damage_dict = {
     "Dead top": "dl", "Chlorotic": "cl", "Red foliage": "rd", "Forked/broken": "fk", "Overtopped": "vc", "Pressed": "vp", "Bent Stem": "b", "Small": "s", "Animal damage": "a", "Frost damage": "ng", "Drought": "nd"
 }
+
+ASSESSMENT_COLOURS = {
+    "Fail":      (0.55, 0.15, 0.15, 0.85),
+    "Poor":      (0.85, 0.35, 0.25, 0.85),
+    "Fair":      (0.95, 0.70, 0.20, 0.85),
+    "Good":      (0.35, 0.75, 0.35, 0.85),
+    "Excellent": (0.10, 0.45, 0.18, 0.85),
+}

@@ -153,3 +153,6 @@ class NativeNumericField(Widget):
     def show_native(self):
         self.bridge.show()
         self._update_frame()
+
+    def set_read_only(self, read_only=True):
+        self.bridge.setReadOnly_(read_only)

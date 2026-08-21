@@ -397,18 +397,7 @@ def save_track(track, name):
     track_uuid = str(uuid.uuid4())
     conn = sqlite3.connect(DB_PATH)
     db = conn.cursor()
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS track_logs (
-            uuid TEXT PRIMARY KEY,
-            name TEXT,
-            created DATETIME,
-            distance REAL,
-            point_count INTEGER,
-            track_json TEXT
-        )
-        """
-    )
+  
     db.execute(
         """
         INSERT INTO track_logs (
