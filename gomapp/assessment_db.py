@@ -18,13 +18,21 @@ def get_grid_direction(trial_uuid):
 
     return row[0]
 
+# def create_trial_assessment(
+#     trial_uuid,
+#     user_uuid,
+#     data
+# ):
+#     assessment_uuid = str(uuid.uuid4())
+#     assessment_date = datetime.now().isoformat()
+
 def create_assessment(
     trial_uuid,
     user_uuid,
-    grid_data,
+    grid_data = None,
     direction = None,
-    trial_rating=None,
-    notes=None,
+    trial_rating = None,
+    notes = None,
     assessment_date=None
 ):
     assessment_uuid = str(uuid.uuid4())
@@ -69,72 +77,72 @@ def create_assessment(
         # --------------------------------------------------
         # Persistent trees
         # --------------------------------------------------
+        if grid_data is not None:
+            trees = conn.execute("""
+                SELECT
+                    tree_uuid,
+                    row_num,
+                    col_num
+                FROM trial_trees
+                WHERE trial_uuid = ?
+            """, (trial_uuid,)).fetchall()
 
-        trees = conn.execute("""
-            SELECT
-                tree_uuid,
-                row_num,
-                col_num
-            FROM trial_trees
-            WHERE trial_uuid = ?
-        """, (trial_uuid,)).fetchall()
+            tree_lookup = {
+                (row, col): tree_uuid
+                for tree_uuid, row, col in trees
+            }
 
-        tree_lookup = {
-            (row, col): tree_uuid
-            for tree_uuid, row, col in trees
-        }
+            # --------------------------------------------------
+            # Tree assessments
+            # --------------------------------------------------
 
-        # --------------------------------------------------
-        # Tree assessments
-        # --------------------------------------------------
+            for row in range(5):
+                for col in range(5):
 
-        for row in range(5):
-            for col in range(5):
+                    data = grid_data[row][col]
+                    tree_uuid = tree_lookup[(row, col)]
 
-                data = grid_data[row][col]
-                tree_uuid = tree_lookup[(row, col)]
+                    tree_assessment_uuid = str(uuid.uuid4())
 
-                tree_assessment_uuid = str(uuid.uuid4())
-
-                conn.execute("""
-                    INSERT INTO tree_assessments (
+                    conn.execute("""
+                        INSERT INTO tree_assessments (
+                            tree_assessment_uuid,
+                            assessment_uuid,
+                            tree_uuid,
+                            rating,
+                            height,
+                            diameter
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (
                         tree_assessment_uuid,
                         assessment_uuid,
                         tree_uuid,
-                        rating,
-                        height,
-                        diameter
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (
-                    tree_assessment_uuid,
-                    assessment_uuid,
-                    tree_uuid,
-                    data["rating"],
-                    data["height"],
-                    data["diameter"]
-                ))
+                        data["rating"],
+                        data["height"],
+                        data["diameter"]
+                    ))
 
-                # ------------------------------------------
-                # Damage agents
-                # ------------------------------------------
+                    # ------------------------------------------
+                    # Damage agents
+                    # ------------------------------------------
 
-                for damage in data["damage"]:
-                    damage_code = damage_dict.get(damage["agent"])
-                    conn.execute("""
-                        INSERT INTO assessment_damage (
-                            damage_uuid,
+                    for damage in data["damage"]:
+                        damage_code = damage_dict.get(damage["agent"])
+                        conn.execute("""
+                            INSERT INTO assessment_damage (
+                                damage_uuid,
+                                tree_assessment_uuid,
+                                damage_code,
+                                severity
+                            )
+                            VALUES (?, ?, ?, ?)
+                        """, (
+                            str(uuid.uuid4()),
                             tree_assessment_uuid,
                             damage_code,
-                            severity
-                        )
-                        VALUES (?, ?, ?, ?)
-                    """, (
-                        str(uuid.uuid4()),
-                        tree_assessment_uuid,
-                        damage_code,
-                        damage["severity"]
-                    ))
+                            damage["severity"]
+                        ))
 
     return assessment_uuid
 
@@ -194,7 +202,7 @@ def load_assessment(assessment_uuid):
         grid = [
             [
                 {
-                    "rating": "Mis",
+                    "rating": "-",
                     "damage": [],
                     "height": None,
                     "diameter": None

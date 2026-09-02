@@ -41,10 +41,45 @@ def migrate_db(conn):
         """)
 
 
+def table_exists(conn, table_name):
+    row = conn.execute(
+        """
+        SELECT EXISTS(
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name = ?
+        )
+        """,
+        (table_name,),
+    ).fetchone()
+
+    return bool(row[0])
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("PRAGMA foreign_keys = ON")
+
+    db_init = table_exists(conn, "users")
+    if(db_init):
+        row = c.execute(
+            """
+            SELECT EXISTS(
+                SELECT 1
+                FROM users
+                WHERE username = ?
+            )
+            """,
+            ('kiri_daust',),
+        ).fetchone()
+        up_to_date = bool(row[0])
+        if(not up_to_date):
+            c.execute("DROP TABLE trials")
+            c.execute("DROP TABLE users")
+            c.execute("DROP TABLE trial_owners")
+            c.execute("DROP TABLE assessments")
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS trials (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -348,6 +383,16 @@ def get_current_user_uuid():
     conn.close()
     return row[0] if row else None
 
+def get_app_state(state_key):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        SELECT value FROM app_state WHERE key=? LIMIT 1
+        """, (state_key,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
 def set_current_user_uuid(user_uuid: str):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -355,6 +400,16 @@ def set_current_user_uuid(user_uuid: str):
         INSERT INTO app_state(key, value) VALUES('current_user_uuid', ?)
         ON CONFLICT(key) DO UPDATE SET value=excluded.value
     """, (user_uuid,))
+    conn.commit()
+    conn.close()
+
+def set_app_state(key,value):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO app_state(key, value) VALUES(?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+    """, (key,value))
     conn.commit()
     conn.close()
 

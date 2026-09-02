@@ -54,16 +54,18 @@ import sys
 from assessment_db import create_assessment, download_assessments, upload_assessments
 from config import DB_PATH, API_URL, USER_RE, icon_dict, ASSESSMENT_COLOURS
 from db_trials import upload_trials, download_trials, update_trial, update_trial_location, get_trial_row, get_photos_for_trial, upload_photos, get_trial_year_range, get_trial_owners, save_track, load_track, list_tracks, delete_track, export_gpx, ensure_trial_trees
-from db_users import upload_trial_owners, download_users, download_trial_owners, init_db, validate_photo_cache, list_users, get_current_user_uuid, set_current_user_uuid, load_current_user_profile, create_user_profile, get_active_user, fetch_users, create_user
+from db_users import db_connection, upload_trial_owners, download_users, download_trial_owners, init_db, validate_photo_cache, list_users, get_current_user_uuid, set_current_user_uuid, load_current_user_profile, create_user_profile, get_active_user, fetch_users, create_user
 from load_mbtiles import SafeMBTilesMapSource, OSMSource, GoogleHybridSource, GoogleTerrainSource, BGCSource
 # from load_tif import GeoTiffOverlay
-from popups import LocationPopup, TrialFormPopup, DraggableButton, EditTrialPopup, EditLocationPopup, TrialFilterPopup, SaveTrackPopup, TrackManagerPopup, AssessmentPopup
+from popups import LocationPopup, TrialFormPopup, DraggableButton, EditTrialPopup, EditLocationPopup, TrialFilterPopup, SaveTrackPopup, TrackManagerPopup, AssessmentPopup, TrialAssessmentPopup
 from file_picker import pick_files
 from photos import compute_sha256, photos_needed, download_photos
 from selector import RectSelectOverlay
 from gom_logger import logger
 from tracklog import TrackLayer, TrackRecorder
 from utils import SectionHeader, RoundedButton
+from TrialMarkers import TrialMarkerLayer
+from syncing import SyncStatus, SyncStatusBar
 
 
 from kivy.properties import BooleanProperty
@@ -333,7 +335,12 @@ class RootWidget(FloatLayout):
         self.trial_markers = []     # list of marker widgets
         self.trial_marker_uuids = set()   # fast duplicate check
         self.gps_fix = None
-
+        self.sync_status = SyncStatus()
+        self.sync_status_bar = SyncStatusBar(
+            status=self.sync_status,
+            sync_callback=self.sync_with_server,
+        )
+        self.refresh_sync_status()
         app = App.get_running_app()
         self.cache_dir = Path(app.user_data_dir) / "tile_cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -357,6 +364,16 @@ class RootWidget(FloatLayout):
         self.default_source = self.mapview.map_source
         self.mbtiles_source = None
 
+        self.trial_layer = TrialMarkerLayer(
+            mapview=self.mapview,
+            trial_callback=self.open_trial_from_canvas
+        )
+
+        self.mapview.add_layer(
+            self.trial_layer,
+            mode="window",
+        )
+
         self.track_layer = TrackLayer()
         self.mapview.add_layer(self.track_layer)
 
@@ -365,8 +382,14 @@ class RootWidget(FloatLayout):
         )
 
         self.track_logging = False
-        
+
         self.add_widget(self.mapview)
+        self.sync_status_bar.size_hint = (0.96, None)
+        self.sync_status_bar.height = dp(42)
+        self.sync_status_bar.pos_hint = {
+            "x": 0.02,
+            "top": 0.96,
+        }
 
         self.overlay = RectSelectOverlay(callback=self.handle_bbox, mapview=self.mapview)
         self.add_widget(self.overlay)
@@ -386,7 +409,7 @@ class RootWidget(FloatLayout):
             allow_stretch=True
         )
         gps_btn.pos_hint = {
-            "right": 0.98,
+            "right": 0.95,
             "y": 0.02
         }
 
@@ -492,31 +515,47 @@ class RootWidget(FloatLayout):
         self.map_style_spinner.bind(text=self.on_map_style_selected)
         self.drawer.add_widget(self.map_style_spinner)
 
-        # self.field = NumericFieldBridge.alloc().initDecimal_(True)
-        # self.field.setPlaceholder_("Height (cm)")
-        # self.field.show()
-        # self.field.becomeFirstResponder()
-
         # Spacer to push things up
         self.drawer.add_widget(Widget())
         self.btn_open = RoundedButton(
             text="MENU",
             size_hint=(None, None),
             size=(dp(70), dp(42)),
-            pos_hint={"x": 0.02, "top": 0.98},
+            pos_hint={"x": 0.02},
         )
-        # self.btn_open = Button(
-        #     text="MENU",
-        #     size_hint=(None, None),
-        #     size=(dp(50), dp(50)),
-        #     pos_hint={"x": 0.02, "top": 0.98},
-        # )
+
         self.btn_open.bind(on_release=self.open_drawer)
+        self.sync_status_bar.bind(
+            y=self._position_menu_button,
+            height=self._position_menu_button,
+        )
+
+        self.bind(
+            pos=self._position_menu_button,
+            size=self._position_menu_button,
+        )
+
+        self._position_menu_button()
         self.add_widget(self.btn_open)
         self._set_scrim(False)
+
+        # Add it after MapView so it appears above the map.
+        self.add_widget(self.sync_status_bar)
         
         self.safe_zone = BottomSafeZone(size_hint=(1, None), height=dp(28), pos_hint={"x": 0, "y": 0})
         self.add_widget(self.safe_zone)
+
+    def _position_menu_button(self, *_):
+        top_margin = dp(12)
+
+        if(self.sync_status_bar.height > 0):
+            top_margin = dp(36)
+
+        self.btn_open.top = (
+            self.top
+            - top_margin
+            - self.sync_status_bar.height
+        )
 
     def toggle_track_logging(self, instance):
         self.track_logging = not self.track_logging
@@ -539,6 +578,9 @@ class RootWidget(FloatLayout):
             on_export=self.export_track,
             on_delete=self.delete_track
         ).open()
+
+    def open_trial_from_canvas(self, trial):
+        self.open_trial_popup(trial)
 
     def draw_track(self, track):
         loaded = load_track(track["uuid"])
@@ -632,10 +674,9 @@ class RootWidget(FloatLayout):
         self.track_logging = False
 
     def handle_bbox(self, bbox):
-        lat_min, lon_min, lat_max, lon_max = bbox
         print("Selected bbox:", bbox)
         self.overlay.enabled = False
-        trials_needed = self.get_trials_in_bounds(bbox)
+        trials_needed = self.trial_layer.get_trials_in_bounds(bbox)
         print(f"Need photos for {len(trials_needed)} trials")
         photos_get = photos_needed(trials_needed)
         print(f"Need {len(photos_get)} pictures")
@@ -804,16 +845,6 @@ class RootWidget(FloatLayout):
 
         popup.open()
 
-#
-    # def remove_geotiff(self, instance=None):
-    #     """Remove the GeoTIFF overlay from the map if it exists."""
-    #     try:
-    #         if self.geotiff_overlay.parent:
-    #             self.geotiff_overlay.parent.remove_widget(self.geotiff_overlay)
-    #         self.geotiff_overlay = None
-    #         print("✅ GeoTIFF overlay removed.")
-    #     except Exception as e:
-    #         print(f"⚠️ Error removing overlay: {e}")
 
     def remove_mbtiles(self, instance=None):
         self.mapview.map_source = self.default_source
@@ -843,17 +874,6 @@ class RootWidget(FloatLayout):
         except Exception as e:
             print(f"❌ Error loading MBTiles: {e}")
 
-    # def pick_geotiff(self, *_):
-    #     pick_files(exts=(".tif", ".tiff"), callback=self._on_tif_picked, subdir="geotiff")
-
-    # def _on_tif_picked(self, selection):
-    #     if not selection:
-    #         return
-    #     path = selection[0]
-    #     # Use your existing GeoTIFF loader / overlay
-    #     overlay = GeoTiffOverlay(path, self.mapview)
-    #     self.mapview.add_widget(overlay)
-    #     self.geotiff_overlay = overlay
 
     def filter_trials_popup(self, instance=None):
         popup = TrialFilterPopup(
@@ -864,9 +884,6 @@ class RootWidget(FloatLayout):
         popup.open()
 
     def load_filtered_trials(self, filters):
-        # Clear existing markers
-        self.clear_all_trial_markers()
-
         # Load trials in background with filters
         Thread(target=self._load_trials_in_background, args=(filters,), daemon=True).start()
 
@@ -909,35 +926,9 @@ class RootWidget(FloatLayout):
         conn.commit()
         conn.close()
         logger.info("✅ Trial saved.")
+        self.trial_layer.add_trial(data)
+        self.refresh_sync_status()
         
-        self.add_trial_marker(
-            uuid=data["uuid"],
-            user_id=get_active_user()["username"],
-            trial_id=c.lastrowid,
-            species=data["species"],
-            seedlings=data["seedlings"],
-            seedlot=data["seedlot"],
-            spacing=data["spacing"],
-            lat=data["lat"],
-            lon=data["lon"],
-            year=datetime.datetime.now().strftime("%Y"),
-            assessed=False
-        )
-        
-        
-    def clear_all_trial_markers(self):
-        logger.info("🧹 Clearing all trial markers")
-
-        # Remove markers from the map
-        for m in self.trial_markers:
-            try:
-                self.mapview.remove_widget(m)
-            except Exception as e:
-                logger.warning("⚠️ Error removing marker:", e)
-
-        # Reset tracking
-        self.trial_markers.clear()
-        self.trial_marker_uuids.clear()
         
     # Async stuff
     def _load_trials_in_background(self, filters=None):
@@ -957,17 +948,28 @@ class RootWidget(FloatLayout):
                         t.lat,
                         t.lon,
                         strftime('%Y-%m', t.timestamp) AS year,
-                        ap.performance
+
+                        COALESCE(
+                            ap.performance,
+                            a.trial_rating
+                        ) AS performance
+
                     FROM trials t
 
-                    LEFT JOIN assessment_performance ap
-                    ON ap.assessment_uuid = (
-                        SELECT ap2.assessment_uuid
-                        FROM assessment_performance ap2
-                        WHERE ap2.trial_uuid = t.uuid
-                        ORDER BY ap2.assessment_date DESC
+                    -- Most recent assessment for this trial
+                    LEFT JOIN assessments a
+                    ON a.assessment_uuid = (
+                        SELECT a2.assessment_uuid
+                        FROM assessments a2
+                        WHERE a2.trial_uuid = t.uuid
+                        ORDER BY a2.assessment_date DESC
                         LIMIT 1
                     )
+
+                    -- Calculated performance for that same assessment,
+                    -- if a tree assessment was completed
+                    LEFT JOIN assessment_performance ap
+                    ON ap.assessment_uuid = a.assessment_uuid
 
                     WHERE 1=1
                 """
@@ -1006,13 +1008,35 @@ class RootWidget(FloatLayout):
 
             conn.close()
 
-            logger.info(
-                f"📥 Background loaded {len(rows)} trials"
-            )
+            trials = []
+            for row in rows:
+                (uuid,user_id,trial_id,species,seedlings,seedlot,spacing,lat,lon,year,performance) = row
+    
+                trials.append({
+                    "uuid": uuid,
+                    "trial_id": trial_id,
+                    "species": species,
+                    "lat": lat,
+                    "lon": lon,
+                    "performance": performance,
+    
+                    # Data needed when the trial is tapped
+                    "trial_data": {
+                        "uuid": uuid,
+                        "user_id": user_id,
+                        "species": species,
+                        "seedlings": seedlings,
+                        "seedlot": seedlot,
+                        "spacing": spacing,
+                        "lat": lat,
+                        "lon": lon,
+                        "year": year
+                    }
+                })
 
             Clock.schedule_once(
                 lambda dt:
-                    self._add_trial_markers_generator(rows)
+                    self.trial_layer.set_trials(trials)
             )
 
         except Exception as e:
@@ -1020,43 +1044,14 @@ class RootWidget(FloatLayout):
                 f"⚠️ Background trial load error: {e}"
             )
 
-    def _add_trial_markers_generator(self, rows, batch_size=50):
-        """
-        Add markers in small batches so UI stays responsive.
-        """
-        total = len(rows)
-        idx = 0
-
-        def add_next_batch(dt):
-            nonlocal idx
-            end = min(idx + batch_size, total)
-
-            for i in range(idx, end):
-                uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon, year, assessed = rows[i]
-                if uuid not in self.trial_marker_uuids:
-                    self.add_trial_marker(uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon, year, assessed)
-
-            idx = end
-            #print(f"📍 Added {end} / {total}")
-
-            if idx < total:
-                # schedule next batch
-                Clock.schedule_once(add_next_batch, 0)
-            else:
-                logger.info("✅ All markers added")
-
-        Clock.schedule_once(add_next_batch, 0)
-
-
     def on_user_switched(self):
-        logger.info("🧹 Clearing all trial markers")
-        self.clear_all_trial_markers()
-
         # Load all rows in background
         Thread(target=self._load_trials_in_background, daemon=True).start()
             
     def sync_with_server(self, instance):
         logger.info("🔄 Starting sync...")
+        self.sync_status.is_syncing = True
+        #self.sync_status.error_message = ""
         download_users()
         download_trials()
         upload_trials()
@@ -1069,78 +1064,12 @@ class RootWidget(FloatLayout):
         upload_trial_owners()
         upload_photos()
         logger.info("✅ Sync complete")
+        self.sync_status.is_syncing = False
+        self.refresh_sync_status()
 
-    
-    def add_trial_marker(self, uuid, user_id, trial_id, species, seedlings, seedlot, spacing, lat, lon, year, performance=None):
-        """Create a lightweight marker which builds its popup only on tap."""
-        icon = icon_dict.get(species.lower(), "GoM_glass.png")
 
-        marker = MapMarkerPopup(lat=lat, lon=lon, source=icon)
-        marker.uuid = uuid
-        marker.trial_id = trial_id
-
-        with marker.canvas.before:
-            marker.assessment_colour = Color(
-                0, 0, 0, 0
-            )
-            marker.assessment_circle = Ellipse()
-
-        # Store only the bare data needed to build the popup later
-        marker.trial_data = {
-            "uuid": uuid,
-            "user_id": user_id,
-            "species": species,
-            "seedlings": seedlings,
-            "seedlot": seedlot,
-            "spacing": spacing,
-            "lat": lat,
-            "lon": lon,
-            "year": year
-        }
-
-        # Build popup lazily on tap
-        marker.bind(on_release=lambda instance: self.open_trial_popup(instance))
-        marker.bind(
-            pos=self.update_assessment_circle,
-            size=self.update_assessment_circle
-        )
-
-        self.update_assessment_circle(marker)
-        colour = ASSESSMENT_COLOURS.get(
-            performance,
-            (0, 0, 0, 0)
-        )
-        marker.assessment_colour.rgba = colour
-
-        self.mapview.add_marker(marker)
-        self.trial_markers.append(marker)
-        self.trial_marker_uuids.add(uuid)
-
-    def update_assessment_circle(self, instance, *_):
-        padding = dp(4)
-        instance.assessment_circle.pos = (
-            instance.x - padding,
-            instance.y - padding
-        )
-
-        instance.assessment_circle.size = (
-            instance.width + padding * 2,
-            instance.height + padding * 2
-        )
-        
-    def get_trials_in_bounds(self, bbox):
-        min_lat, min_lon, max_lat, max_lon = bbox
-        results = []
-        for m in self.trial_markers:
-            if min_lat <= m.trial_data['lat'] <= max_lat and min_lon <= m.trial_data['lon'] <= max_lon:
-                results.append(m.uuid)
-        return results
-        
-        
-    def open_trial_popup(self, marker):
+    def open_trial_popup(self, data):
         """Builds a popup that looks like the old one (600x600 w/ translucent bg)."""
-
-        d = marker.trial_data
 
         # Main container with explicit size
         box = BoxLayout(
@@ -1152,16 +1081,16 @@ class RootWidget(FloatLayout):
 
         box.bind(minimum_height=box.setter("height"))
         ##ensure trees exist for assessment
-        ensure_trial_trees(marker.uuid)
-
+        ensure_trial_trees(data['uuid'])
+        trial_info = data['trial_data']
         # --- Info text ---
         info_text = (
-            f"[b]Planter:[/b] {d['user_id']}\n"
-            f"[b]Species:[/b] {d['species']}\n"
-            f"[b]Seedlings:[/b] {d['seedlings']}\n"
-            f"[b]Seedlot:[/b] {d['seedlot']}\n"
-            f"[b]Spacing:[/b] {d['spacing']}\n"
-            f"[b]Year:[/b] {d['year']}\n"
+            f"[b]Planter:[/b] {trial_info['user_id']}\n"
+            f"[b]Species:[/b] {trial_info['species']}\n"
+            f"[b]Seedlings:[/b] {trial_info['seedlings']}\n"
+            f"[b]Seedlot:[/b] {trial_info['seedlot']}\n"
+            f"[b]Spacing:[/b] {trial_info['spacing']}\n"
+            f"[b]Year:[/b] {trial_info['year']}\n"
         )
 
         info_label = Label(
@@ -1176,7 +1105,7 @@ class RootWidget(FloatLayout):
         )
         box.add_widget(info_label)
         
-        photo_paths = get_photos_for_trial(marker.uuid) ##make sure it returns None
+        photo_paths = get_photos_for_trial(data['uuid']) ##make sure it returns None
         if photo_paths:
             view_btn = Button(
                 text="View Photo",
@@ -1199,7 +1128,7 @@ class RootWidget(FloatLayout):
             background_color=(0.2, 0.4, 0.9, 0.9),
         )
         edit_btn.bind(
-            on_release=lambda *_: (popup.dismiss(), self.open_edit_trial(marker))
+            on_release=lambda *_: (popup.dismiss(), self.open_edit_trial(data))
         )
         box.add_widget(edit_btn)
 
@@ -1212,7 +1141,7 @@ class RootWidget(FloatLayout):
             background_color=(0.5, 0.2, 0.6, 0.9),
         )
         loc_btn.bind(
-            on_release=lambda *_: (popup.dismiss(), self.open_edit_location(marker))
+            on_release=lambda *_: (popup.dismiss(), self.open_edit_location(data))
         )
         box.add_widget(loc_btn)
 
@@ -1229,7 +1158,7 @@ class RootWidget(FloatLayout):
             background_color=(0.8, 0.1, 0.8, 0.9),
         )
         growth_button.bind(
-            on_release=lambda *_: (popup.dismiss(), self.open_growth_popup(marker))
+            on_release=lambda *_: (popup.dismiss(), self.open_growth_popup(data))
         )
         box.add_widget(growth_button)
 
@@ -1242,7 +1171,7 @@ class RootWidget(FloatLayout):
             background_color=(0.8, 0.2, 0.2, 0.9),
         )
         delete_btn.bind(
-            on_release=lambda *_: (self.confirm_delete_trial(marker, popup)) #, popup.dismiss(), self.delete_trial(marker)
+            on_release=lambda *_: (self.confirm_delete_trial(data, popup)) #, popup.dismiss(), self.delete_trial(marker)
         )
         box.add_widget(delete_btn)
 
@@ -1260,7 +1189,7 @@ class RootWidget(FloatLayout):
 
         popup.open()
         
-    def confirm_delete_trial(self, marker, parent_popup):
+    def confirm_delete_trial(self, data, parent_popup):
             confirm_box = BoxLayout(orientation="vertical", spacing=10, padding=10)
             confirm_box.add_widget(Label(text="Are you sure you want \n to delete this trial?", size_hint_y=None, height=dp(60)))
             btn_row = BoxLayout(size_hint_y=None, height=dp(60), spacing=dp(10))
@@ -1272,7 +1201,7 @@ class RootWidget(FloatLayout):
 
             parent_popup.content = confirm_box
 
-            yes_btn.bind(on_release=lambda *_: (parent_popup.dismiss(), self.delete_trial(marker)))
+            yes_btn.bind(on_release=lambda *_: (parent_popup.dismiss(), self.delete_trial(data)))
             no_btn.bind(on_release=lambda *_: parent_popup.dismiss())
     
     def open_photo_carousel_popup(self, photo_paths, title="Photos"):
@@ -1330,8 +1259,8 @@ class RootWidget(FloatLayout):
         popup.open()
 
         
-    def open_edit_trial(self, marker):
-        uuid = marker.uuid
+    def open_edit_trial(self, data):
+        uuid = data['uuid']
         trial = get_trial_row(uuid)
         if not trial:
             print("⚠️ Trial not found:", uuid)
@@ -1349,8 +1278,8 @@ class RootWidget(FloatLayout):
 
         EditTrialPopup(trial_row=trial, on_save=_on_save).open()
 
-    def open_edit_location(self, marker):
-        uuid = marker.uuid
+    def open_edit_location(self, data):
+        uuid = data['uuid']
         trial = get_trial_row(uuid)
         if not trial:
             print("⚠️ Trial not found:", uuid)
@@ -1367,66 +1296,57 @@ class RootWidget(FloatLayout):
             # self.refresh_trial_marker(uuid)
         EditLocationPopup(trial_row=trial, on_save=_on_save, get_current_gps = self.get_current_gps).open()
         
-    def open_growth_popup(self, marker):
+    def open_growth_popup(self, data):
         
-        AssessmentPopup(
-            marker=marker,
+        TrialAssessmentPopup(
+            data=data,
             existing=None,
             save_callback=self.save_assessment,
         ).open()
 
-    def save_assessment(self, marker, data, direction):
-        print("Saving assessment for trial:", marker.uuid)
+    def save_assessment(self, marker, ass_data, grid_data, direction):
+        #print("Grid data: ", grid_data)
         create_assessment(
-            trial_uuid=marker.uuid,
+            trial_uuid=marker['uuid'],
             user_uuid=load_current_user_profile()["user_uuid"],
-            grid_data=data,
+            grid_data=grid_data,
             direction=direction,
-            trial_rating=None,
-            notes=None
+            trial_rating=ass_data.get("trial_rating", None),
+            notes=ass_data.get("notes", None)
         )
-
-        
-    def load_growth_grid(self, marker):
-        id = marker.uuid
-        print(id)
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT growth_grid FROM trials WHERE uuid=?", (id,))
-            row = cur.fetchone()
-        print(row)
-        if not row or row[0] is None:
-            return None  # No grid stored yet
-
-        try:
-            data = json.loads(row[0])
-            return data.get("grid")  # Should be a 5×5 list
-        except Exception as e:
-            print("Error parsing grid JSON:", e)
-            return None
+        self.refresh_sync_status()
             
-    def delete_trial(self, marker):
-        trial_id = getattr(marker, "trial_id", None)
-        if trial_id is None:
-            print("⚠️ Marker missing trial_id")
-            return
-
-        # Remove from map
-        try:
-            self.mapview.remove_marker(marker)
-        except Exception as e:
-            print("⚠️ Could not remove marker:", e)
-
+    def delete_trial(self, data):
+        self.trial_layer.delete_trial(data['uuid'])
         # Remove from database
         try:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
-            c.execute("DELETE FROM trials WHERE id = ?", (trial_id,))
+            c.execute("DELETE FROM trials WHERE uuid = ?", (data['uuid'],))
             conn.commit()
             conn.close()
-            print(f"🗑️ Deleted trial {trial_id}")
+            print(f"🗑️ Deleted trial {data['uuid']}")
         except Exception as e:
             print("⚠️ Error deleting trial:", e)
+
+    def refresh_sync_status(self):
+        with db_connection() as conn:
+            trial_count = conn.execute("""
+                SELECT COUNT(*)
+                FROM trials
+                WHERE synced = 0
+            """).fetchone()[0]
+
+            assessment_count = conn.execute("""
+                SELECT COUNT(*)
+                FROM assessments
+                WHERE synced = 0
+            """).fetchone()[0]
+
+        self.sync_status.update_counts(
+            trial_count,
+            assessment_count,
+        )
 
 class TreeApp(App):
     instance = None

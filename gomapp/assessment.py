@@ -19,7 +19,8 @@ from datetime import datetime
 class GrowthCell(Button):
 
     COLOURS = {
-        "Mis": (0.8, 0.8, 0.8, 1), # light gray
+        "-": (1,1,1,1),
+        "Mis": (0.6, 0.6, 0.6, 1), # light gray
         "D": (0,0,0, 1),   # black
         "P": (0.72, 0.28, 0.28, 1.0),   # red
         "F": (0.96, 0.78, 0.30, 1.0),   # orange
@@ -91,6 +92,11 @@ class GrowthCell(Button):
     def update_cell(self):
 
         rating = self.data["rating"]
+        self.color = (
+            (0, 0, 0, 1)
+            if rating == "-"
+            else (1, 1, 1, 1)
+        )
         damage_summary = ""
         value_summary = ""
 
@@ -132,7 +138,7 @@ class GrowthGrid(GridLayout):
             self.data = [
                 [
                     {
-                        "rating": "Mis",
+                        "rating": "-",
                         "damage": [],
                         "height": None,
                         "diameter": None

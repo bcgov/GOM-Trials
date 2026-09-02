@@ -26,7 +26,7 @@ from utils import RoundedButton
 from assessment import AssessmentPanel, GrowthGrid, AssessmentNavigator
 from assessment_db import get_trial_assessment_uuids, load_assessment, create_assessment, get_grid_direction
 from db_trials import get_most_recent_trial, add_trial_owner, get_replicate_no, get_trial_owners, get_trial_year_range
-from db_users import load_current_user_profile, get_active_user
+from db_users import load_current_user_profile, get_active_user, set_app_state, get_app_state
 from numeric_entry import NativeNumericField
 
 SMR_OPTIONS = ["(Select)", "0 - Very Xeric", "1 - Xeric", "2 - Subxeric", "3 - Submesic", "4 - Mesic", "5 - Subhygric", "6 - Hygric", "7 - Subhydric", "8 - Hydric"]
@@ -142,17 +142,10 @@ class LocationPopup(Popup):
                                    multiline=False, size_hint_y=None, height=dp(44))
         self.elev_input = TextInput(text=str(gps_fix["elev"]), hint_text="Elevation (m)",
                                     multiline=False, size_hint_y=None, height=dp(44))
-        self.block_input = TextInput(text=prev_trial.get("block_name", "") or "", hint_text="Block name",
+        self.block_input = TextInput(text=get_app_state("current_block") or "", hint_text="Block name",
                                     multiline=False, size_hint_y=None, height=dp(44))
                                    
-#        def ensure_visible(ti):
-#            def _on_focus(_inst, focused):
-#                if focused:
-#                    Clock.schedule_once(lambda dt: scroll.scroll_to(ti, padding=dp(20)), 0)
-#            ti.bind(focus=_on_focus)
-#
-#        ensure_visible(self.lat_input)
-#        ensure_visible(self.lon_input)
+
         form.add_widget(Label(text=(
                             f"GPS: {gps_status['accuracy']:.0f} m • "
                             f"{gps_status['age']:.0f} s"
@@ -174,7 +167,7 @@ class LocationPopup(Popup):
             print(f"⚠️ Error downloading trial owners: {e}")
 
         owner_list = get_trial_owners()
-        self.owner_spinner = Spinner(text=prev_trial.get("trial_owner", "Select trial owner") or "Select trial owner", values=[x for x in owner_list if x not in ["Other", prev_trial.get("trial_owner")]] + ["Other"], size_hint_y=None, height=dp(44))
+        self.owner_spinner = Spinner(text=get_app_state("trial_owner") or "Select Trial Owner", values=[x for x in owner_list] + ["Other"], size_hint_y=None, height=dp(44))
         form.add_widget(Label(text="Trial owner", size_hint_y=None, height=dp(20)))
         form.add_widget(self.owner_spinner)
 
@@ -214,6 +207,7 @@ class LocationPopup(Popup):
                 return
 
             add_trial_owner(company, contact_name, contact_email, objective)
+            set_app_state("trial_owner", contact_name)
             self.owner = contact_name
             self.owner_spinner.values = [contact_name] + self.owner_spinner.values[:-1]  # add new owner to spinner, before "Other"
             owner_popup.dismiss()
@@ -226,6 +220,7 @@ class LocationPopup(Popup):
                 owner_popup.open()
             else:                
                 self.owner = text
+                set_app_state("trial_owner", self.owner)
    
         self.owner_spinner.bind(text=on_spinner_select)
 
@@ -250,6 +245,7 @@ class LocationPopup(Popup):
             elev = float(self.elev_input.text)
             block_name = self.block_input.text.strip()
             owner = self.owner
+            set_app_state("current_block", block_name)
         except ValueError:
             print("⚠️ Invalid coordinates or elevation")
             return
@@ -1106,11 +1102,11 @@ class AssessmentPopup(Popup):
         self.separator_height = 0
 
         self.assessment_uuids = get_trial_assessment_uuids(
-            marker.uuid
+            self.marker['uuid']
         )
 
         self.grid_corner_direction = get_grid_direction(
-            self.marker.uuid
+            self.marker['uuid']
         )
 
         self.page_index = None
@@ -1418,7 +1414,7 @@ class AssessmentPopup(Popup):
         return [
             [
                 {
-                    "rating": "Mis",
+                    "rating": "-",
                     "damage": [],
                     "height": None,
                     "diameter": None
@@ -1484,6 +1480,7 @@ class AssessmentPopup(Popup):
     # ==========================================================
 
     def save(self, *_):
+        print("AssessmentPopup grid data: ", self.grid.data)
         direction = self.direction_spinner.text
         if self.save_callback:
             self.save_callback(
@@ -1570,3 +1567,190 @@ class AssessmentPopup(Popup):
             self.panel_container.height = 0
             self.grid.height = target_grid
             self.grid.width = target_grid
+
+
+class TrialAssessmentPopup(Popup):
+
+    RATINGS = {"Excellent": "E",
+               "Good": "G",
+               "Fair": "F",
+               "Poor": "P",
+               "Dead": "D",
+               "Missing": "M",
+               }
+
+    def __init__(
+        self,
+        data,
+        existing=None,
+        save_callback=None,
+        **kwargs
+    ):
+
+        super().__init__(**kwargs)
+        self.data = data
+        self.save_callback = save_callback
+        self.direction = None
+        self.tree_data = None
+
+        self.title = "Trial Assessment"
+        self.size_hint = (0.9, 0.75)
+        self.auto_dismiss = False
+
+        root = BoxLayout(
+            orientation="vertical",
+            spacing=dp(12),
+            padding=dp(12)
+        )
+
+        # --------------------------------------------------
+        # Overall rating
+        # --------------------------------------------------
+
+        root.add_widget(
+            Label(
+                text="Overall Trial Rating",
+                size_hint_y=None,
+                height=dp(28)
+            )
+        )
+        self.rating_spinner = Spinner(
+            text="General Vigour",
+            values=self.RATINGS.keys(),
+            size_hint_y=None,
+            height=dp(44)
+        )
+        root.add_widget(
+            self.rating_spinner
+        )
+
+        # --------------------------------------------------
+        # Notes
+        # --------------------------------------------------
+
+        root.add_widget(
+            Label(
+                text="Notes",
+                size_hint_y=None,
+                height=dp(28)
+            )
+        )
+
+        self.notes_input = TextInput(
+            multiline=True,
+            hint_text="Optional notes..."
+        )
+
+        root.add_widget(
+            self.notes_input
+        )
+
+        # --------------------------------------------------
+        # Tree assessment
+        # --------------------------------------------------
+
+        self.tree_assessment_btn = RoundedButton(
+            text="Open Tree Assessment",
+            size_hint_y=None,
+            height=dp(48)
+        )
+
+        self.tree_assessment_btn.bind(
+            on_release=self.open_tree_assessment
+        )
+
+        root.add_widget(
+            self.tree_assessment_btn
+        )
+
+        # --------------------------------------------------
+        # Buttons
+        # --------------------------------------------------
+
+        button_row = BoxLayout(
+            spacing=dp(10),
+            size_hint_y=None,
+            height=dp(44)
+        )
+
+        cancel_btn = Button(
+            text="Cancel"
+        )
+
+        cancel_btn.bind(
+            on_release=lambda *_:
+                self.dismiss()
+        )
+
+        save_btn = Button(
+            text="Save Assessment",
+            background_normal="",
+            background_color=(0.2, 0.6, 0.2, 1)
+        )
+
+        save_btn.bind(
+            on_release=self.save_trial
+        )
+
+        button_row.add_widget(
+            cancel_btn
+        )
+
+        button_row.add_widget(
+            save_btn
+        )
+
+        root.add_widget(
+            button_row
+        )
+
+        self.content = root
+
+        # --------------------------------------------------
+        # Existing values
+        # --------------------------------------------------
+
+        if existing is not None:
+            self.load(existing)
+
+
+    def open_tree_assessment(self, *_):
+
+        popup = AssessmentPopup(
+            marker=self.data,
+            existing=None,
+            save_callback=self.save_from_tree_ass
+        )
+        popup.open()
+
+    def save_from_tree_ass(self, marker, grid_data, direction):
+        #print("TrialAssessmentPopup grid data: ", grid_data)
+        self.tree_data = grid_data
+        self.direction = direction
+        self.save_all()
+
+    def save_trial(self, *_):
+        self.save_all()
+
+    def save_all(self, *_):
+        rating = self.rating_spinner.text
+        notes = self.notes_input.text.strip()
+        ass = {
+            "trial_rating": None,
+            "notes": None
+        }
+        if rating != "General Vigour":
+            ass["trial_rating"] = rating
+        if notes != "":
+            ass["notes"] = notes
+
+
+        if self.save_callback:
+            self.save_callback(
+                self.data,
+                ass,
+                self.tree_data,
+                self.direction,
+            )
+
+        self.dismiss()

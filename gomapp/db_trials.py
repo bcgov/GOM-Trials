@@ -605,3 +605,4 @@ def ensure_trial_trees(trial_uuids, conn=None, rows=5, cols=5):
     else:
         with db_connection() as conn:
             conn.executemany(sql, records)
+
