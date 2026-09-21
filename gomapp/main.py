@@ -54,12 +54,12 @@ import sys
 from assessment_db import create_assessment, download_assessments, upload_assessments
 from config import DB_PATH, API_URL, USER_RE, icon_dict, ASSESSMENT_COLOURS
 from db_trials import upload_trials, download_trials, update_trial, update_trial_location, get_trial_row, get_photos_for_trial, upload_photos, get_trial_year_range, get_trial_owners, save_track, load_track, list_tracks, delete_track, export_gpx, ensure_trial_trees
-from db_users import db_connection, upload_trial_owners, download_users, download_trial_owners, init_db, validate_photo_cache, list_users, get_current_user_uuid, set_current_user_uuid, load_current_user_profile, create_user_profile, get_active_user, fetch_users, create_user
+from db_users import db_connection, upload_trial_owners, download_users, upload_users, download_trial_owners, init_db, validate_photo_cache, list_users, get_current_user_uuid, set_current_user_uuid, load_current_user_profile, create_user_profile, get_active_user, fetch_users
 from load_mbtiles import SafeMBTilesMapSource, OSMSource, GoogleHybridSource, GoogleTerrainSource, BGCSource
 # from load_tif import GeoTiffOverlay
-from popups import LocationPopup, TrialFormPopup, DraggableButton, EditTrialPopup, EditLocationPopup, TrialFilterPopup, SaveTrackPopup, TrackManagerPopup, AssessmentPopup, TrialAssessmentPopup
+from popups import LocationPopup, TrialFormPopup, DownloadProgressPopup, EditTrialPopup, EditLocationPopup, TrialFilterPopup, SaveTrackPopup, TrackManagerPopup, AssessmentPopup, TrialAssessmentPopup
 from file_picker import pick_files
-from photos import compute_sha256, photos_needed, download_photos
+from photos import compute_sha256, photos_needed, download_photos, download_one_photo, get_local_photos
 from selector import RectSelectOverlay
 from gom_logger import logger
 from tracklog import TrackLayer, TrackRecorder
@@ -309,11 +309,11 @@ class LoginScreen(Screen):
             "company": ""  # optional for now
         }
 
-        try:
-            new_user = create_user(user)[0]
-        except Exception as e:
-            self.err.text = f"User not synced; offline"
-            new_user = username  # fallback to local profile only
+        # try:
+        #     new_user = create_user(user)[0]
+        # except Exception as e:
+        #     self.err.text = f"User not synced; offline"
+        new_user = user  # fallback to local profile only
 
         # update local list
         self.users.append(new_user)
@@ -393,6 +393,7 @@ class RootWidget(FloatLayout):
 
         self.overlay = RectSelectOverlay(callback=self.handle_bbox, mapview=self.mapview)
         self.add_widget(self.overlay)
+
         
         # --- Drawer config ---
         self.drawer_w = dp(280)
@@ -565,10 +566,16 @@ class RootWidget(FloatLayout):
             self.track_button.text = "Pause Track Log"
             self.finish_button.opacity = 1
             self.finish_button.height = dp(52)
+            manager = gps._location_manager
+            manager.setAllowsBackgroundLocationUpdates_(True)
+            manager.setPausesLocationUpdatesAutomatically_(False)
+            #gps.start()
         else:
             self.track_button.text = "Start Track Log"
             self.finish_button.opacity = 0
             self.finish_button.height = 0
+            manager = gps._location_manager
+            manager.setAllowsBackgroundLocationUpdates_(False)
 
     def view_saved_tracks(self, instance):
         tracks = list_tracks()
@@ -654,6 +661,8 @@ class RootWidget(FloatLayout):
 
     def finish_track_log(self, *_):        
         track = self.track_recorder.finish()
+        manager = gps._location_manager
+        manager.setAllowsBackgroundLocationUpdates_(False)
         popup = SaveTrackPopup(
             track=track,
             on_save=self.on_save_track,
@@ -677,11 +686,72 @@ class RootWidget(FloatLayout):
         print("Selected bbox:", bbox)
         self.overlay.enabled = False
         trials_needed = self.trial_layer.get_trials_in_bounds(bbox)
-        print(f"Need photos for {len(trials_needed)} trials")
-        photos_get = photos_needed(trials_needed)
-        print(f"Need {len(photos_get)} pictures")
-        download_photos(photos_get, trials_needed)
-        print("Finished downloading photos!")
+        self.download_popup = DownloadProgressPopup(
+            total=1
+        )
+        self.download_popup.status_label.text = "Checking available photos..."
+        self.download_popup.open()
+        Thread(
+            target=self._download_photos_worker,
+            args=(trials_needed,),
+            daemon=True
+        ).start()
+
+    def _download_photos_worker(self, trials_needed):
+        try:
+            remote_photos = photos_needed(trials_needed)
+            local_photos = get_local_photos(trials_needed)
+            to_download = []
+            for p in remote_photos:
+                uuid = p["photo_uuid"]
+                if (
+                    uuid not in local_photos
+                    or local_photos[uuid]["sha256"] != p["sha256"]
+                ):
+                    to_download.append(p)
+            total = len(to_download)
+            Clock.schedule_once(
+                lambda dt:
+                    self._start_photo_progress(total)
+            )
+            for i, photo in enumerate(to_download, start=1):
+                download_one_photo(photo)
+                Clock.schedule_once(
+                    lambda dt, completed=i:
+                        self.download_popup.update_progress(completed)
+                )
+            Clock.schedule_once(
+                lambda dt:
+                    self._photo_download_complete(total)
+            )
+        except Exception as e:
+            logger.exception(
+                f"Photo download failed: {e}"
+            )
+
+    def _start_photo_progress(self, total):
+        self.download_popup.total = total
+        self.download_popup.progress_bar.max = max(total, 1)
+        self.download_popup.progress_bar.value = 0
+        if total == 0:
+            self.download_popup.status_label.text = (
+                "All photos are already downloaded."
+            )
+        else:
+            self.download_popup.status_label.text = (
+                f"Downloading 0 of {total} photos..."
+            )
+
+    def _photo_download_complete(self, total):
+        if self.download_popup:
+            if total > 0:
+                self.download_popup.progress_bar.value = total
+                self.download_popup.status_label.text = (
+                    f"Downloaded {total} photos."
+                )
+            self.download_popup.dismiss()
+            self.download_popup = None
+
         
     def _set_scrim(self, open_):
         self.scrim.active = open_
@@ -1046,27 +1116,57 @@ class RootWidget(FloatLayout):
 
     def on_user_switched(self):
         # Load all rows in background
-        Thread(target=self._load_trials_in_background, daemon=True).start()
+        ##try sync on startup
+        Thread(
+                target=self.sync_with_server,
+                daemon=True
+            ).start()
             
-    def sync_with_server(self, instance):
+    def sync_with_server(self, instance=None):
         logger.info("🔄 Starting sync...")
-        self.sync_status.is_syncing = True
-        #self.sync_status.error_message = ""
-        download_users()
-        download_trials()
-        upload_trials()
-        logger.info("✅ Trials synced.")
-        download_assessments()
-        upload_assessments()
-        logger.info("✅ Assessments synced.")
-        Thread(target=self._load_trials_in_background, daemon=True).start()
-        download_trial_owners()
-        upload_trial_owners()
-        upload_photos()
-        logger.info("✅ Sync complete")
+
+        Clock.schedule_once(
+            lambda dt: setattr(
+                self.sync_status,
+                "is_syncing",
+                True
+            )
+        )
+
+        try:
+
+            download_users()
+            upload_users()
+            logger.info("✅ Users synced.")
+            download_trials()
+            upload_trials()
+            logger.info("✅ Trials synced.")
+
+            download_assessments()
+            upload_assessments()
+            logger.info("✅ Assessments synced.")
+
+            self._load_trials_in_background()
+
+            download_trial_owners()
+            upload_trial_owners()
+            upload_photos()
+
+            logger.info("✅ Sync complete")
+
+        except Exception as e:
+            logger.exception(
+                f"❌ Sync failed: {e}"
+            )
+
+        finally:
+            Clock.schedule_once(
+                lambda dt: self._finish_sync()
+            )
+
+    def _finish_sync(self):
         self.sync_status.is_syncing = False
         self.refresh_sync_status()
-
 
     def open_trial_popup(self, data):
         """Builds a popup that looks like the old one (600x600 w/ translucent bg)."""

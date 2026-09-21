@@ -21,8 +21,12 @@ def upload_trials():
     with db_connection() as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-        cur.execute("SELECT * FROM trials WHERE synced=0 AND user_id = ?", (user,))
+        cur.execute("SELECT * FROM trials WHERE synced=0")
         trials = [dict(row) for row in cur.fetchall()]
+        now = datetime.now(timezone.utc).isoformat()
+        for trial in trials:
+            trial["updated_at"] = now
+            trial["updated_by"] = user
     print(f"There are {len(trials)} records")
     if not trials:
         print("✅ No local records to upload.")

@@ -460,8 +460,6 @@ def create_user_profile(name, email, username):
         }
 
     else:
-        # ➕ New user → create UUID + insert
-        namespace = uuid.UUID("username")
         profile = {
             "user_uuid": user_uuid(username),
             "name": name,
@@ -528,6 +526,7 @@ def download_users():
         return False
 
     users = result.get("users", [])
+    print(f"Users: {users}")
 
     with db_connection() as conn:
 
@@ -573,11 +572,23 @@ def fetch_users():
     r.raise_for_status()
     return r.json()
 
-def create_user(user):
-    r = requests.post(f"{API_URL}/users", json=user, timeout=10)
-    logger.info(f"[API] Create user response: {r.status_code} - {r.text}")
+def upload_users():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+
+    c.execute("""
+        SELECT username, user_uuid, name, email
+        FROM users
+    """)
+    new_users = c.fetchall()
+    conn.close()
+
+    users = [dict(row) for row in new_users]
+
+    r = requests.post(f"{API_URL}/users", json=users, timeout=10)
+    logger.info(f"[API] Upload user response: {r.status_code} - {r.text}")
     r.raise_for_status()
-    return r.json()
 
 # Download trial owners from server and update local trial_owners table
 def download_trial_owners():

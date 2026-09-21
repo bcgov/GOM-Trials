@@ -19,6 +19,8 @@ from kivy.app import App
 from kivy.uix.image import Image
 from kivy.uix.checkbox import CheckBox
 from kivy.uix.gridlayout import GridLayout
+from kivy.uix.progressbar import ProgressBar
+
 from photos import IOSPhotoPicker
 from db_users import download_trial_owners
 from gom_logger import logger
@@ -121,8 +123,8 @@ class LocationPopup(Popup):
         super().__init__(**kwargs)
 
         if not gps_status["valid"]:
-            popup = Popup(title="GPS Error", content=Label(text="No valid GPS fix available. Please try again."), size_hint=(0.8, 0.4))
-            return popup
+            self.title = "GPS not ready"
+            return
         
         self.title = "Set Trial Location"
         self.size_hint = (0.92, 0.75)  # <- a bit taller helps a lot
@@ -188,7 +190,6 @@ class LocationPopup(Popup):
         self.other_inputs_layout.add_widget(self.objective_input)
         self.other_inputs_layout.add_widget(self.owner_create_btn)
         
-
         owner_popup = Popup(title="Add trial owner", content=self.other_inputs_layout, size_hint=(0.9, None), height=dp(400), auto_dismiss=True)
 
         def confirm_owner(_):
@@ -1645,6 +1646,29 @@ class TrialAssessmentPopup(Popup):
             self.notes_input
         )
 
+        self.photo_paths = []
+        
+        self.photo_preview = Image(
+            size_hint_y=None,
+            height=dp(0),
+            allow_stretch=True,
+            keep_ratio=True,
+        )
+
+        self.photo_btn = RoundedButton(
+            text="Attach Photo",
+            size_hint_y=None,
+            height=dp(48)
+        )
+        self.photo_btn.bind(
+            on_release=self.open_attach_photo_menu
+        )
+        root.add_widget(
+            self.photo_btn
+        )
+        root.add_widget(
+            self.photo_preview
+        )
         # --------------------------------------------------
         # Tree assessment
         # --------------------------------------------------
@@ -1654,11 +1678,9 @@ class TrialAssessmentPopup(Popup):
             size_hint_y=None,
             height=dp(48)
         )
-
         self.tree_assessment_btn.bind(
             on_release=self.open_tree_assessment
         )
-
         root.add_widget(
             self.tree_assessment_btn
         )
@@ -1713,6 +1735,40 @@ class TrialAssessmentPopup(Popup):
         if existing is not None:
             self.load(existing)
 
+    def open_attach_photo_menu(self, *_):
+        box = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(12))
+        btns = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(10))
+
+        b_camera = Button(text="Camera")
+        b_library = Button(text="Photo library")
+        btns.add_widget(b_camera)
+        btns.add_widget(b_library)
+        box.add_widget(btns)
+
+        p = Popup(title="Attach photo", content=box, size_hint=(0.9, None), height=dp(180), auto_dismiss=True)
+
+        def pick(source):
+            p.dismiss()
+            self.start_photo_pick(source)
+
+        b_camera.bind(on_release=lambda *_: pick("camera"))
+        b_library.bind(on_release=lambda *_: pick("library"))
+
+        p.open()
+
+    def start_photo_pick(self, source: str):
+        PHOTO_PICKER.pick(source, on_done=self.on_photo_picked)
+
+    def on_photo_picked(self, path: str | None):
+        if not path:
+            return  # cancelled
+
+        self.photo_paths.append(path)
+        #self.validate_form()  # re-validate form now that we have a photo``
+        self.photo_preview.height = dp(120)
+        self.photo_preview.source = path
+        self.photo_preview.reload()
+
 
     def open_tree_assessment(self, *_):
 
@@ -1754,3 +1810,46 @@ class TrialAssessmentPopup(Popup):
             )
 
         self.dismiss()
+
+class DownloadProgressPopup(Popup):
+
+    def __init__(self, total=1, **kwargs):
+        super().__init__(**kwargs)
+
+        self.total = total
+
+        self.title = "Downloading Photos"
+        self.size_hint = (0.8, None)
+        self.height = dp(180)
+        self.auto_dismiss = False
+
+        layout = BoxLayout(
+            orientation="vertical",
+            padding=dp(20),
+            spacing=dp(15)
+        )
+
+        self.status_label = Label(
+            text="Checking available photos..."
+        )
+
+        self.progress_bar = ProgressBar(
+            max=max(total, 1),
+            value=0,
+            size_hint_y=None,
+            height=dp(20)
+        )
+
+        layout.add_widget(self.status_label)
+        layout.add_widget(self.progress_bar)
+
+        self.content = layout
+
+    def update_progress(self, completed):
+
+        self.progress_bar.value = completed
+
+        self.status_label.text = (
+            f"Downloading {completed} of "
+            f"{self.total} photos..."
+        )
