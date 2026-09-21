@@ -1412,7 +1412,8 @@ class RootWidget(FloatLayout):
             grid_data=grid_data,
             direction=direction,
             trial_rating=ass_data.get("trial_rating", None),
-            notes=ass_data.get("notes", None)
+            notes=ass_data.get("notes", None),
+            photo_paths=ass_data.get("photo_paths", []),
         )
         self.refresh_sync_status()
             

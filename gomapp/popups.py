@@ -1793,7 +1793,8 @@ class TrialAssessmentPopup(Popup):
         notes = self.notes_input.text.strip()
         ass = {
             "trial_rating": None,
-            "notes": None
+            "notes": None,
+            "photo_paths": list(self.photo_paths),
         }
         if rating != "General Vigour":
             ass["trial_rating"] = rating

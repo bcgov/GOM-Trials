@@ -248,13 +248,13 @@ def get_local_photos(trial_uuids):
     finally:
         conn.close()
 
-def db_append_photos(uuid, trial, path, sha, bytes_):
+def db_append_photos(uuid, trial, path, sha, bytes_, assessment_uuid=None):
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""
-    INSERT INTO trial_photos(photo_uuid, trial_uuid, path, sha256, bytes, sync_status)
-    VALUES (?,?,?,?,?,?)
+    INSERT INTO trial_photos(photo_uuid, trial_uuid, path, sha256, bytes, sync_status, assessment_uuid)
+    VALUES (?,?,?,?,?,?,?)
                 """,
-                (uuid, trial, path, sha, bytes_, "uploaded"))
+                (uuid, trial, path, sha, bytes_, "uploaded", assessment_uuid))
     conn.commit()
     conn.close()
 
@@ -263,13 +263,13 @@ def db_append_photos(uuid, trial, path, sha, bytes_):
 def upload_photos():
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute("""
-        SELECT photo_uuid, trial_uuid, path, sha256, bytes
+        SELECT photo_uuid, trial_uuid, path, sha256, bytes, assessment_uuid
         FROM trial_photos
         WHERE sync_status IN ('pending','failed')
     """).fetchall()
 
     for row in rows:
-        photo_uuid, trial_uuid, local_path, sha256, bytes_ = row
+        photo_uuid, trial_uuid, local_path, sha256, bytes_, assessment_uuid = row
 
         # 1. INIT request
         init_resp = requests.post(
@@ -277,6 +277,7 @@ def upload_photos():
             json={
                 "photo_uuid": photo_uuid,
                 "trial_uuid": trial_uuid,
+                "assessment_uuid": assessment_uuid,
                 "sha256": sha256,
                 "bytes": bytes_,
             }
@@ -290,6 +291,7 @@ def upload_photos():
                 SET sync_status='uploaded'
                 WHERE photo_uuid=?
             """, (photo_uuid,))
+            conn.commit()
             continue
 
         # 2. UPLOAD
@@ -297,6 +299,7 @@ def upload_photos():
         logger.info(f"Uploading photo: {photo_uuid}")
         params = {
             "trial_uuid": trial_uuid,
+            "assessment_uuid": assessment_uuid,
             "sha256": sha256,
             "bytes": bytes_,
         }
@@ -331,6 +334,7 @@ def upload_photos():
                 SET sync_status='failed'
                 WHERE photo_uuid=?
             """, (photo_uuid,))
+        conn.commit()
     conn.close()
 
 def get_trial_owners():

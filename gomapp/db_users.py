@@ -34,6 +34,13 @@ def column_exists(conn, table, column):
     return any(row[1] == column for row in rows)
 
 def migrate_db(conn):
+    # Photos may be downloaded independently of assessment records.
+    if not column_exists(conn, "trial_photos", "assessment_uuid"):
+        conn.execute("ALTER TABLE trial_photos ADD COLUMN assessment_uuid TEXT")
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_trial_photos_assessment
+        ON trial_photos(assessment_uuid)
+    """)
     if not column_exists(conn, "trials", "grid_direction"):
         conn.execute("""
             ALTER TABLE trials

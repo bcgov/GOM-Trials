@@ -128,7 +128,10 @@ def download_one_photo(photo):
 
     # Save relative path to local DB
     rel = f"images/{uuid}.jpg"
-    db_append_photos(uuid, trial, outpath, photo["sha256"],photo["bytes"])
+    db_append_photos(
+        uuid, trial, outpath, photo["sha256"], photo["bytes"],
+        assessment_uuid=photo.get("assessment_uuid"),
+    )
     print("Downloaded:", rel)
     
 def download_photos(remote_photos, trial_uuids):

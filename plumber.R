@@ -32,7 +32,28 @@ get_field <- function(x, key) {
 `%||%` <- function(x, y) if (!is.null(x) && length(x) && !is.na(x)) x else y
 
 
+## convert null to NAs
+db_char <- function(x) {
+  if (is.null(x) || length(x) == 0)
+    NA_character_
+  else
+    as.character(x)
+}
 
+db_num <- function(x) {
+  if (is.null(x) || length(x) == 0)
+    NA_real_
+  else
+    as.numeric(x)
+}
+
+json_value <- function(x) {
+  if (length(x) == 0 || is.na(x[[1]])) {
+    unbox(NA)
+  } else {
+    unbox(x[[1]])
+  }
+}
 
 #* Debug: show what 'image' looks like
 #* @param image:file
@@ -70,91 +91,83 @@ function(req, res) {
   res
 }
 
-#* Create a new user
+#* Download users
+#* @get /users
+#* @serializer json
+function(req, res) {
+  con <- pg_connect()
+  tryCatch({
+    
+    users <- DBI::dbGetQuery(
+      con,
+      "
+      SELECT
+          user_uuid,
+          username,
+          name,
+          email
+      FROM gom_users
+      ORDER BY username
+      "
+    )
+    
+    list(
+      success = TRUE,
+      users = users
+    )
+    
+  }, error = function(e) {
+    
+    res$status <- 500
+    
+    list(
+      success = FALSE,
+      error = conditionMessage(e)
+    )
+  })
+}
+
+#* Upsert users from client
 #* @post /users
 function(req, res) {
+  
+  body <- jsonlite::fromJSON(req$postBody, simplifyVector = TRUE)
+  if (length(body) == 0) return(list(message = "No trials received"))
+  
   con <- pg_connect()
   on.exit(dbDisconnect(con), add = TRUE)
   
-  body <- req$postBody
-  if (is.null(body) || !nzchar(body)) {
-    res$status <- 400
-    res$body <- jsonlite::toJSON(list(error = "Missing request body"), auto_unbox = TRUE)
-    return(res)
+  inserted <- 0
+  # Loop over rows
+  for (i in seq_len(nrow(body))) {
+    t <- body[i, ]
+    
+    result <- dbExecute(con, "
+      INSERT INTO gom_users (
+        username,
+        user_uuid,
+        name,
+        email,
+        created_at
+      )
+      VALUES (
+        $1,$2,$3,$4, NOW()
+      )
+      ON CONFLICT (user_uuid)
+      DO NOTHING",
+                        params = list(
+                          t$username,
+                          t$user_uuid,
+                          t$name,
+                          t$email
+                        ))
+    
+    inserted = inserted + 1
   }
   
-  dat <- tryCatch(
-    jsonlite::fromJSON(body),
-    error = function(e) NULL
-  )
-  
-  if (is.null(dat)) {
-    res$status <- 400
-    res$body <- jsonlite::toJSON(list(error = "Invalid JSON"), auto_unbox = TRUE)
-    return(res)
-  }
-  
-  username <- trimws(dat$username %||% "")
-  name     <- trimws(dat$name %||% "")
-  email    <- trimws(dat$email %||% "")
-  company  <- trimws(dat$company %||% "")
-  
-  if (!nzchar(username)) {
-    res$status <- 400
-    res$body <- jsonlite::toJSON(list(error = "Username is required"), auto_unbox = TRUE)
-    return(res)
-  }
-  
-  if (!nzchar(name)) {
-    res$status <- 400
-    res$body <- jsonlite::toJSON(list(error = "Name is required"), auto_unbox = TRUE)
-    return(res)
-  }
-  
-  # optional: normalize username to lowercase
-  username <- tolower(username)
-  
-  # Check uniqueness first
-  exists_query <- "SELECT 1 FROM gom_users WHERE username = $1 LIMIT 1"
-  exists <- dbGetQuery(con, exists_query, params = list(username))
-  
-  if (nrow(exists) > 0) {
-    res$status <- 409
-    res$body <- jsonlite::toJSON(
-      list(error = "Username already exists"),
-      auto_unbox = TRUE
-    )
-    return(res)
-  }
-  
-  insert_query <- "
-    INSERT INTO gom_users (username, name, email, company, created_at)
-    VALUES ($1, $2, $3, $4, NOW())
-    RETURNING username, name, email, company, created_at
-  "
-  
-  out <- tryCatch(
-    dbGetQuery(
-      con,
-      insert_query,
-      params = list(username, name, email, company)
-    ),
-    error = function(e) e
-  )
-  
-  if (inherits(out, "error")) {
-    res$status <- 500
-    res$body <- jsonlite::toJSON(
-      list(error = paste("Database insert failed:", conditionMessage(out))),
-      auto_unbox = TRUE
-    )
-    return(res)
-  }
-  
-  res$status <- 201
-  res$body <- jsonlite::toJSON(out, auto_unbox = TRUE, na = "null")
-  res
+  list(inserted = inserted)
 }
+
 
 
 #* Upload a JPG image (multipart/form-data)
@@ -235,72 +248,275 @@ function(req, res, since = NULL) {
   res
 }
 
-
 #* Upsert trials from client
 #* @post /trials
 function(req, res) {
   
-  body <- jsonlite::fromJSON(req$postBody, simplifyVector = TRUE)
-  if (length(body) == 0) return(list(message = "No trials received"))
+  body <- jsonlite::fromJSON(
+    req$postBody,
+    simplifyVector = TRUE
+  )
   
-  con <- pg_connect()
-  on.exit(dbDisconnect(con), add = TRUE)
+  if(!"updated_at" %in% colnames(body)) body$updated_at <- NA
+  if(!"updated_by" %in% colnames(body)) body$updated_by <- NA
   
-  inserted <- 0
-  # Loop over rows
-  for (i in seq_len(nrow(body))) {
-    t <- body[i, ]
-    
-    result <- dbExecute(con, "
-      INSERT INTO gom_trials (
-        uuid,
-        lat, lon,
-        species, seedlot, seedlings, spacing,
-        timestamp, user_id, growth_grid,
-        site_series, smr, snr, soil_site_factors, site_prep, request_key,  elev, contact_name, block_name, replicate_no
-      )
-      VALUES (
-        $1,$2,$3,
-        $4,$5,$6,NULLIF($7, '')::double precision,
-        $8,$9,$10,
-        $11,$12,$13,$14,$15,$16,$17,$18,$19,$20
-      )
-      ON CONFLICT (uuid)
-      DO UPDATE SET
-        lat          = EXCLUDED.lat,
-        lon          = EXCLUDED.lon,
-        species      = EXCLUDED.species,
-        seedlot      = EXCLUDED.seedlot,
-        seedlings    = EXCLUDED.seedlings,
-        spacing      = EXCLUDED.spacing,
-        growth_grid  = EXCLUDED.growth_grid,
-        site_series  = EXCLUDED.site_series,
-        smr          = EXCLUDED.smr,
-        snr          = EXCLUDED.snr,
-        soil_site_factors = EXCLUDED.soil_site_factors,
-        site_prep    = EXCLUDED.site_prep,
-        elev         = EXCLUDED.elev,
-        timestamp    = EXCLUDED.timestamp,
-        contact_name = EXCLUDED.contact_name,
-        block_name   = EXCLUDED.block_name,
-        replicate_no   = EXCLUDED.replicate_no
-      WHERE 
-        gom_trials.timestamp IS NULL
-        OR EXCLUDED.timestamp >= gom_trials.timestamp
-    ",
-                        params = list(
-                          t$uuid,
-                          t$lat, t$lon,
-                          t$species, t$seedlot, t$seedlings, t$spacing,
-                          t$timestamp, t$user_id, t$growth_grid,
-                          t$site_series, t$smr, t$snr, t$site_fact, t$site_prep, t$request_key, t$elev, t$trial_owner, t$block_name, t$replicate_no
-                        ))
-    
-    inserted = inserted + 1
+  if (length(body) == 0) {
+    return(list(
+      message = "No trials received"
+    ))
   }
   
-  list(inserted = inserted)
+  con <- pg_connect()
+  on.exit(DBI::dbDisconnect(con), add = TRUE)
+  
+  inserted <- 0
+  updated <- 0
+  unchanged <- 0
+  
+  DBI::dbWithTransaction(con, {
+    
+    for (i in seq_len(nrow(body))) {
+      
+      t <- body[i, ]
+      
+      trial_uuid <- t$uuid
+      
+      # ====================================================
+      # 1. Existing server version
+      # ====================================================
+      
+      old_trial <- DBI::dbGetQuery(
+        con,
+        "
+        SELECT *
+        FROM gom_trials
+        WHERE uuid = $1
+        FOR UPDATE
+        ",
+        params = list(
+          trial_uuid
+        )
+      )
+      
+      existed_before <- nrow(old_trial) == 1
+      
+      
+      # ====================================================
+      # 2. Upsert
+      # ====================================================
+      
+      rows_changed <- DBI::dbExecute(
+        con,
+        "
+        INSERT INTO gom_trials (
+          uuid,
+          lat,
+          lon,
+          species,
+          seedlot,
+          seedlings,
+          spacing,
+          timestamp,
+          user_id,
+          growth_grid,
+          site_series,
+          smr,
+          snr,
+          soil_site_factors,
+          site_prep,
+          request_key,
+          elev,
+          contact_name,
+          block_name,
+          replicate_no,
+          updated_at,
+          updated_by
+        )
+
+        VALUES (
+          $1, $2, $3,
+          $4, $5, $6,
+          NULLIF($7, '')::double precision,
+          $8, $9, $10,
+          $11, $12, $13,
+          $14, $15, $16,
+          $17, $18, $19, $20,
+          $21, $22
+        )
+
+        ON CONFLICT (uuid)
+        DO UPDATE SET
+          lat               = EXCLUDED.lat,
+          lon               = EXCLUDED.lon,
+          species           = EXCLUDED.species,
+          seedlot           = EXCLUDED.seedlot,
+          seedlings         = EXCLUDED.seedlings,
+          spacing           = EXCLUDED.spacing,
+          growth_grid       = EXCLUDED.growth_grid,
+          site_series       = EXCLUDED.site_series,
+          smr               = EXCLUDED.smr,
+          snr               = EXCLUDED.snr,
+          soil_site_factors = EXCLUDED.soil_site_factors,
+          site_prep         = EXCLUDED.site_prep,
+          elev              = EXCLUDED.elev,
+          contact_name      = EXCLUDED.contact_name,
+          block_name        = EXCLUDED.block_name,
+          replicate_no      = EXCLUDED.replicate_no,
+          updated_at        = EXCLUDED.updated_at,
+          updated_by        = EXCLUDED.updated_by
+
+        WHERE
+          gom_trials.updated_at IS NULL
+          OR EXCLUDED.updated_at >= gom_trials.updated_at
+        ",
+        params = list(
+          t$uuid,
+          t$lat,
+          t$lon,
+          t$species,
+          t$seedlot,
+          t$seedlings,
+          t$spacing,
+          t$timestamp,
+          t$user_id,
+          t$growth_grid,
+          t$site_series,
+          t$smr,
+          t$snr,
+          t$site_fact,
+          t$site_prep,
+          t$request_key,
+          t$elev,
+          t$trial_owner,
+          t$block_name,
+          t$replicate_no,
+          t$updated_at,
+          t$updated_by
+        )
+      )
+      
+      
+      # ====================================================
+      # 3. Fetch resulting server version
+      # ====================================================
+      
+      new_trial <- DBI::dbGetQuery(
+        con,
+        "
+        SELECT *
+        FROM gom_trials
+        WHERE uuid = $1
+        ",
+        params = list(
+          trial_uuid
+        )
+      )
+      
+      
+      # ====================================================
+      # 4. New trial: no UPDATE audit needed
+      # ====================================================
+      
+      if (!existed_before) {
+        
+        inserted <- inserted + 1
+        next
+      }
+      
+      
+      # ====================================================
+      # 5. Determine whether anything actually changed
+      # ====================================================
+      
+      old_compare <- old_trial
+      new_compare <- new_trial
+      
+      # Don't let audit metadata itself be what makes
+      # two otherwise identical records appear different.
+      compare_columns <- intersect(
+        names(old_compare),
+        names(new_compare)
+      )
+      
+      old_compare <- old_compare[, compare_columns, drop = FALSE]
+      new_compare <- new_compare[, compare_columns, drop = FALSE]
+      
+      changed <- !isTRUE(
+        all.equal(
+          old_compare,
+          new_compare,
+          check.attributes = FALSE
+        )
+      )
+      
+      if (!changed) {
+        
+        unchanged <- unchanged + 1
+        next
+      }
+      
+      
+      # ====================================================
+      # 6. Audit the change
+      # ====================================================
+      
+      old_json <- jsonlite::toJSON(
+        as.list(old_trial[1, ]),
+        auto_unbox = TRUE,
+        na = "null",
+        null = "null"
+      )
+      
+      new_json <- jsonlite::toJSON(
+        as.list(new_trial[1, ]),
+        auto_unbox = TRUE,
+        na = "null",
+        null = "null"
+      )
+      
+      DBI::dbExecute(
+        con,
+        "
+        INSERT INTO trial_audit (
+          audit_uuid,
+          trial_uuid,
+          changed_by,
+          changed_at,
+          action,
+          old_data,
+          new_data
+        )
+
+        VALUES (
+          $1,
+          $2,
+          $3,
+          NOW(),
+          'UPDATE',
+          $4::jsonb,
+          $5::jsonb
+        )
+        ",
+        params = list(
+          uuid::UUIDgenerate(),
+          trial_uuid,
+          t$updated_by,
+          as.character(old_json),
+          as.character(new_json)
+        )
+      )
+      
+      updated <- updated + 1
+    }
+  })
+  
+  list(
+    inserted = inserted,
+    updated = updated,
+    unchanged = unchanged
+  )
 }
+
 
 ####Photo upload api
 #* @post /photos/init
@@ -326,10 +542,13 @@ function(req, res) {
     return(list(upload_required = FALSE, reason = "photo_uuid_exists"))
   }
   
-  # Already have identical content for this trial?
+  # Deduplicate within planting photos or this specific assessment.
   q2 <- dbGetQuery(con,
-                   "SELECT photo_uuid FROM trial_photos WHERE trial_uuid=$1 AND sha256=$2 LIMIT 1",
-                   params=list(body$trial_uuid, body$sha256)
+                   "SELECT photo_uuid FROM trial_photos
+                    WHERE trial_uuid=$1 AND sha256=$2
+                      AND assessment_uuid IS NOT DISTINCT FROM $3::text LIMIT 1",
+                   params=list(body$trial_uuid, body$sha256,
+                               body$assessment_uuid %||% NA_character_)
   )
   if (nrow(q2) > 0) {
     return(list(upload_required = FALSE, reason = "duplicate_sha"))
@@ -360,6 +579,7 @@ function(req, res, photo_uuid, image) {
   content <- image[[1]]
   
   trial_uuid <- req$args$trial_uuid
+  assessment_uuid <- req$args$assessment_uuid %||% NA_character_
   sha256     <- req$args$sha256
   bytes      <- as.numeric(req$args$bytes)
   created_at <- req$args$created_at_client
@@ -386,17 +606,19 @@ function(req, res, photo_uuid, image) {
   dbExecute(con, "
     INSERT INTO trial_photos (
       photo_uuid, trial_uuid, sha256, bytes,
-      file_relpath, uploaded_at
-    ) VALUES ($1,$2,$3,$4,$5, now())
+      file_relpath, assessment_uuid, uploaded_at
+    ) VALUES ($1,$2,$3,$4,$5,$6, now())
     ON CONFLICT (photo_uuid)
     DO UPDATE SET
       trial_uuid   = EXCLUDED.trial_uuid,
+      assessment_uuid = EXCLUDED.assessment_uuid,
       sha256       = EXCLUDED.sha256,
       bytes        = EXCLUDED.bytes,
       file_relpath = EXCLUDED.file_relpath,
       uploaded_at  = now()
   ",
-            params=list(photo_uuid, trial_uuid, sha256, actual_bytes, relpath)
+            params=list(photo_uuid, trial_uuid, sha256, actual_bytes, relpath,
+                        assessment_uuid)
   )
   
   list(ok=TRUE, file_relpath=relpath, bytes=actual_bytes)
@@ -419,12 +641,12 @@ function(req, res) {
   on.exit(dbDisconnect(con), add = TRUE)
   
   df <- dbGetQuery(con, "
-    SELECT photo_uuid, trial_uuid, file_relpath, sha256, bytes
+    SELECT photo_uuid, trial_uuid, assessment_uuid, file_relpath, sha256, bytes
     FROM trial_photos
     WHERE trial_uuid = ANY(string_to_array($1, ',')::TEXT[])
   ", params = list(trial_uuids))
   
-  static_base <- "http://178.128.233.227/static/" 
+  static_base <- "http://178.128.233.227/static/"
   
   # If file_relpath is like "<trial_uuid>/<photo_uuid>.jpg"
   df$url <- if(nrow(df > 0)) paste0(static_base, df$file_relpath) else character(0)
@@ -439,7 +661,7 @@ function(req, res) {
   base_query <- "
     SELECT
       company_name,
-      contact_name, 
+      contact_name,
       contact_email,
       objective
     FROM trial_owners
@@ -491,4 +713,369 @@ function(req, res) {
   }
   
   list(inserted = inserted)
+}
+
+### assessments ################################
+
+#* Upload assessments
+#* @post /assessments
+#* @serializer json
+function(req, res) {
+  
+  body <- jsonlite::fromJSON(
+    req$postBody,
+    simplifyVector = FALSE
+  )
+  
+  assessments <- body$assessments
+  
+  if (is.null(assessments)) {
+    res$status <- 400
+    return(list(
+      success = FALSE,
+      error = "Missing assessments"
+    ))
+  }
+  con <- pg_connect()
+  tryCatch({
+    
+    DBI::dbWithTransaction(con, {
+      
+      for (assessment in assessments) {
+        if (!is.null(assessment$grid_direction) &&
+            length(assessment$grid_direction) == 1) {
+          
+          DBI::dbExecute(
+            con,
+            "
+            UPDATE gom_trials
+            SET grid_direction = $1
+            WHERE uuid = $2
+              AND grid_direction IS NULL
+            ",
+            params = list(
+              assessment$grid_direction,
+              assessment$trial_uuid
+            )
+          )
+        }
+        # --------------------------------------------------
+        # Assessment
+        # --------------------------------------------------
+        
+        DBI::dbExecute(
+          con,
+          "
+          INSERT INTO assessments (
+              assessment_uuid,
+              trial_uuid,
+              user_uuid,
+              assessment_date,
+              trial_rating,
+              notes
+          )
+          VALUES ($1, $2, $3, $4, $5, $6)
+
+          ON CONFLICT (assessment_uuid)
+          DO NOTHING
+          ",
+          params = list(
+            assessment$assessment_uuid,
+            assessment$trial_uuid,
+            assessment$user_uuid,
+            assessment$assessment_date,
+            db_char(assessment$trial_rating),
+            db_char(assessment$notes)
+          )
+        )
+        
+        # --------------------------------------------------
+        # Trees
+        # --------------------------------------------------
+        
+        for (tree in assessment$trees) {
+          
+          # Ensure permanent tree exists.
+          #
+          # This is safe because tree_uuid is deterministic.
+          
+          DBI::dbExecute(
+            con,
+            "
+            INSERT INTO trial_trees (
+                tree_uuid,
+                trial_uuid,
+                tree_number,
+                row_num,
+                col_num
+            )
+            VALUES ($1, $2, $3, $4, $5)
+
+            ON CONFLICT (tree_uuid)
+            DO NOTHING
+            ",
+            params = list(
+              tree$tree_uuid,
+              assessment$trial_uuid,
+              tree$tree_number,
+              tree$row_num,
+              tree$col_num
+            )
+          )
+          
+          # ------------------------------------------------
+          # Tree assessment
+          # ------------------------------------------------
+          
+          DBI::dbExecute(
+            con,
+            "
+            INSERT INTO tree_assessments (
+                tree_assessment_uuid,
+                assessment_uuid,
+                tree_uuid,
+                rating,
+                height,
+                diameter
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+
+            ON CONFLICT (tree_assessment_uuid)
+            DO NOTHING
+            ",
+            params = list(
+              tree$tree_assessment_uuid,
+              assessment$assessment_uuid,
+              tree$tree_uuid,
+              db_char(tree$rating),
+              db_num(tree$height),
+              db_num(tree$diameter)
+            )
+          )
+          
+          # ------------------------------------------------
+          # Damage
+          # ------------------------------------------------
+          
+          if (length(tree$damage) > 0) {
+            
+            for (damage in tree$damage) {
+              
+              DBI::dbExecute(
+                con,
+                "
+                INSERT INTO assessment_damage (
+                    damage_uuid,
+                    tree_assessment_uuid,
+                    damage_code,
+                    severity
+                )
+                VALUES ($1, $2, $3, $4)
+
+                ON CONFLICT (damage_uuid)
+                DO NOTHING
+                ",
+                params = list(
+                  damage$damage_uuid,
+                  tree$tree_assessment_uuid,
+                  damage$damage_code,
+                  damage$severity
+                )
+              )
+            }
+          }
+        }
+      }
+    })
+    
+    list(
+      success = TRUE,
+      uploaded = length(assessments)
+    )
+    
+  }, error = function(e) {
+    
+    res$status <- 500
+    
+    list(
+      success = FALSE,
+      error = conditionMessage(e)
+    )
+  })
+}
+
+#* Download assessments
+#* @param since:string Optional timestamp
+#* @get /assessments
+#* @serializer json
+function(since = NULL, res) {
+  con <- pg_connect()
+  if (is.null(since) || !nzchar(since)) {
+    
+    assessments <- DBI::dbGetQuery(
+      con,
+      "
+      SELECT
+          a.assessment_uuid,
+          a.trial_uuid,
+          a.user_uuid,
+          a.assessment_date,
+          a.trial_rating,
+          a.notes,
+          a.created_at,
+          t.grid_direction
+      FROM assessments a
+      JOIN gom_trials t
+        ON a.trial_uuid = t.uuid::uuid
+      ORDER BY a.created_at
+      "
+    )
+    
+  } else {
+    
+    assessments <- DBI::dbGetQuery(
+      con,
+      "
+      SELECT
+          a.assessment_uuid,
+          a.trial_uuid,
+          a.user_uuid,
+          a.assessment_date,
+          a.trial_rating,
+          a.notes,
+          a.created_at,
+          t.grid_direction
+      FROM assessments a
+      JOIN gom_trials t
+        ON a.trial_uuid = t.uuid::uuid
+      WHERE a.created_at > $1
+      ORDER BY a.created_at
+      ",
+      params = list(since)
+    )
+  }
+  
+  result <- vector(
+    "list",
+    nrow(assessments)
+  )
+  
+  for (i in seq_len(nrow(assessments))) {
+    
+    a <- assessments[i, ]
+    
+    trees <- DBI::dbGetQuery(
+      con,
+      "
+      SELECT
+          ta.tree_assessment_uuid,
+          ta.tree_uuid,
+          tt.tree_number,
+          tt.row_num,
+          tt.col_num,
+          ta.rating,
+          ta.height,
+          ta.diameter
+      FROM tree_assessments ta
+      JOIN trial_trees tt
+        ON ta.tree_uuid = tt.tree_uuid
+      WHERE ta.assessment_uuid = $1
+      ORDER BY tt.tree_number
+      ",
+      params = list(a$assessment_uuid)
+    )
+    
+    tree_list <- vector(
+      "list",
+      nrow(trees)
+    )
+    
+    for (j in seq_len(nrow(trees))) {
+      
+      tree <- trees[j, ]
+      
+      damage <- DBI::dbGetQuery(
+        con,
+        "
+        SELECT
+            damage_uuid,
+            damage_code,
+            severity
+        FROM assessment_damage
+        WHERE tree_assessment_uuid = $1
+        ",
+        params = list(
+          tree$tree_assessment_uuid
+        )
+      )
+      
+      damage_list <- vector(
+        "list",
+        nrow(damage)
+      )
+      
+      if (nrow(damage) > 0) {
+        
+        for (k in seq_len(nrow(damage))) {
+          
+          d <- damage[k, ]
+          
+          damage_list[[k]] <- list(
+            damage_uuid =
+              json_value(d$damage_uuid),
+            
+            damage_code =
+              json_value(d$damage_code),
+            
+            severity =
+              json_value(d$severity)
+          )
+        }
+      }
+      
+      tree_list[[j]] <- list(
+        tree_assessment_uuid =
+          json_value(tree$tree_assessment_uuid),
+        
+        tree_uuid =
+          json_value(tree$tree_uuid),
+        
+        tree_number =
+          json_value(tree$tree_number),
+        
+        row_num =
+          json_value(tree$row_num),
+        
+        col_num =
+          json_value(tree$col_num),
+        
+        rating =
+          json_value(tree$rating),
+        
+        height =
+          json_value(tree$height),
+        
+        diameter =
+          json_value(tree$diameter),
+        
+        damage = damage_list
+      )
+    }
+    
+    result[[i]] <- list(
+      assessment_uuid = json_value(a$assessment_uuid),
+      trial_uuid = json_value(a$trial_uuid),
+      user_uuid = json_value(a$user_uuid),
+      assessment_date = json_value(a$assessment_date),
+      trial_rating = json_value(a$trial_rating),
+      notes = json_value(a$notes),
+      created_at = json_value(a$created_at),
+      grid_direction = json_value(a$grid_direction),
+      trees = tree_list
+    )
+  }
+  
+  list(
+    assessments = result
+  )
 }

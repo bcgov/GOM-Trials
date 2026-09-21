@@ -1,4 +1,6 @@
 import uuid
+import hashlib
+import os
 from datetime import datetime
 from db_users import db_connection
 from config import damage_dict
@@ -33,7 +35,8 @@ def create_assessment(
     direction = None,
     trial_rating = None,
     notes = None,
-    assessment_date=None
+    assessment_date=None,
+    photo_paths=None,
 ):
     assessment_uuid = str(uuid.uuid4())
 
@@ -143,6 +146,22 @@ def create_assessment(
                             damage_code,
                             damage["severity"]
                         ))
+
+        # Keep the assessment and its photo records in one transaction.
+        for path in dict.fromkeys(photo_paths or []):
+            digest = hashlib.sha256()
+            with open(path, "rb") as image:
+                for chunk in iter(lambda: image.read(8192), b""):
+                    digest.update(chunk)
+            conn.execute("""
+                INSERT INTO trial_photos (
+                    photo_uuid, trial_uuid, assessment_uuid, path,
+                    sha256, bytes, sync_status
+                ) VALUES (?, ?, ?, ?, ?, ?, 'pending')
+            """, (
+                str(uuid.uuid4()), trial_uuid, assessment_uuid, path,
+                digest.hexdigest(), os.path.getsize(path),
+            ))
 
     return assessment_uuid
 
