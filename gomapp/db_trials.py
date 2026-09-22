@@ -206,13 +206,30 @@ def get_most_recent_trial():
     return dict(zip(keys, row))
     
 def get_photos_for_trial(trial_uuid):
+    """Return photo paths with their trial/assessment context for the carousel."""
     conn = sqlite3.connect(DB_PATH)
     try:
-        rows = conn.execute(
-            "SELECT path FROM trial_photos WHERE trial_uuid = ? ORDER BY photo_id",
-            (trial_uuid,)
-        ).fetchall()
-        return [r[0] for r in rows]
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            WITH numbered_assessments AS (
+                SELECT assessment_uuid, trial_uuid, assessment_date,
+                       ROW_NUMBER() OVER (
+                           ORDER BY datetime(assessment_date), created_at, assessment_uuid
+                       ) AS assessment_number
+                FROM assessments
+                WHERE trial_uuid = ?
+            )
+            SELECT p.path, p.assessment_uuid, a.assessment_number,
+                   CASE WHEN p.assessment_uuid IS NULL THEN t.timestamp
+                        ELSE a.assessment_date END AS photo_date
+            FROM trial_photos p
+            LEFT JOIN trials t ON t.uuid = p.trial_uuid
+            LEFT JOIN numbered_assessments a
+                ON a.assessment_uuid = p.assessment_uuid AND a.trial_uuid = p.trial_uuid
+            WHERE p.trial_uuid = ?
+            ORDER BY p.photo_id
+        """, (trial_uuid, trial_uuid)).fetchall()
+        return [dict(row) for row in rows]
     finally:
         conn.close()
 

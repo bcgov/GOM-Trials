@@ -6,13 +6,14 @@ from kivy.uix.togglebutton import ToggleButton
 from kivy.uix.spinner import Spinner
 from kivy.uix.textinput import TextInput
 from kivy.uix.label import Label
+from kivy.uix.popup import Popup
 from kivy.graphics import Color, RoundedRectangle, Line
 from kivy.uix.scrollview import ScrollView
 from kivy.clock import Clock
 import copy
 
 from utils import SectionHeader, PageDots, RoundedButton
-from config import damage_dict
+from config import damage_dict, ASSESSMENT_HOVER
 from numeric_entry import NativeNumericField
 from datetime import datetime
 
@@ -245,9 +246,76 @@ class GrowthGrid(GridLayout):
         )
 
 
+class RatingHelpButton(ToggleButton):
+    """Select on a tap; holding opens help without changing the selection."""
+
+    def __init__(self, help_callback, **kwargs):
+        self.help_callback = help_callback
+        self._help_event = None
+        self._rating_touch = None
+        self._cancelled = False
+        super().__init__(**kwargs)
+        self.bind(parent=self._cancel_if_inactive, disabled=self._cancel_if_inactive)
+
+    def _cancel_if_inactive(self, *_):
+        if self.parent is None or self.disabled:
+            self.cancel_gesture()
+
+    def cancel_gesture(self):
+        if self._help_event is not None:
+            self._help_event.cancel()
+            self._help_event = None
+        if self._rating_touch is not None:
+            self._rating_touch.ungrab(self)
+            self._rating_touch = None
+
+    def on_touch_down(self, touch):
+        if self.disabled or not self.collide_point(*touch.pos) or touch.is_mouse_scrolling:
+            return super().on_touch_down(touch)
+        if self._rating_touch is not None:
+            return True
+        self._rating_touch = touch
+        self._start_pos = touch.pos
+        self._cancelled = False
+        touch.grab(self)
+        self._help_event = Clock.schedule_once(self._show_help, 0.6)
+        return True
+
+    def on_touch_move(self, touch):
+        if touch is self._rating_touch:
+            dx = touch.x - self._start_pos[0]
+            dy = touch.y - self._start_pos[1]
+            if dx * dx + dy * dy > dp(12) ** 2 or not self.collide_point(*touch.pos):
+                self._cancelled = True
+                if self._help_event is not None:
+                    self._help_event.cancel()
+                    self._help_event = None
+            return True
+        return super().on_touch_move(touch)
+
+    def _show_help(self, _dt):
+        self._help_event = None
+        if self._rating_touch is not None and not self._cancelled and not self.disabled:
+            self._cancelled = True
+            self.help_callback(self)
+
+    def on_touch_up(self, touch):
+        if touch is not self._rating_touch:
+            return super().on_touch_up(touch)
+        select = not self._cancelled and not self.disabled and self.collide_point(*touch.pos)
+        self.cancel_gesture()
+        if select:
+            # Toggle only after a short tap, so help never changes the tree rating.
+            self._do_press()
+            self.dispatch("on_release")
+        return True
+
+
 class AssessmentPanel(BoxLayout):
 
     RATINGS = ["Mis","D","P","F","G","E"]
+    RATING_NAMES = {"Mis": "Mis", "D": "Dead", "P": "Poor",
+                    "F": "Fair", "G": "Good", "E": "Excellent"}
 
     def __init__(self,
                  damage_agents=None,
@@ -268,6 +336,7 @@ class AssessmentPanel(BoxLayout):
 
         self.tree = None
         self.read_only = False
+        self._rating_help_popup = None
         self.previous_callback = previous_callback
         self.next_callback = next_callback
         self.change_callback = change_callback
@@ -291,9 +360,10 @@ class AssessmentPanel(BoxLayout):
 
         for rating in self.RATINGS:
 
-            btn = ToggleButton(
+            btn = RatingHelpButton(
                 text=rating,
-                group="rating",
+                help_callback=self.show_rating_help,
+                group=f"rating-{id(self)}",
                 allow_no_selection=False
             )
 
@@ -303,6 +373,10 @@ class AssessmentPanel(BoxLayout):
             rating_row.add_widget(btn)
 
         rating_card.add_widget(rating_row)
+        rating_card.add_widget(Label(
+            text="Tap to select; hold a rating for help.",
+            font_size=sp(12), size_hint_y=None, height=dp(24),
+        ))
         # =======================================================
         # Measurements card
         # =======================================================
@@ -427,6 +501,37 @@ class AssessmentPanel(BoxLayout):
             self.height_input.show_native()
             self.diameter_input.show_native()
 
+    def show_rating_help(self, button):
+        if self._rating_help_popup is not None:
+            return
+        name = self.RATING_NAMES[button.text]
+        content = BoxLayout(orientation="vertical", spacing=dp(12), padding=dp(12))
+        scroll = ScrollView(do_scroll_x=False)
+        explanation = Label(
+            text=ASSESSMENT_HOVER.get(name, "No description available."),
+            size_hint_y=None, halign="left", valign="top",
+        )
+        explanation.bind(
+            width=lambda label, width: setattr(label, "text_size", (width, None)),
+            texture_size=lambda label, size: setattr(label, "height", size[1]),
+        )
+        scroll.add_widget(explanation)
+        content.add_widget(scroll)
+        close = Button(text="Close", size_hint_y=None, height=dp(44))
+        content.add_widget(close)
+        popup = Popup(title="Missing" if name == "Mis" else name,
+                      content=content, size_hint=(0.9, 0.45))
+        close.bind(on_release=popup.dismiss)
+        popup.bind(on_dismiss=self._close_rating_help)
+        self._rating_help_popup = popup
+        self.hide_native()
+        popup.open()
+
+    def _close_rating_help(self, *_):
+        self._rating_help_popup = None
+        if self.parent is not None:
+            self.show_native()
+
     def on_rating(self, button):
 
         if self.tree is None:
@@ -490,6 +595,10 @@ class AssessmentPanel(BoxLayout):
             self.change_callback()
 
     def destroy(self):
+        for button in self.rating_buttons.values():
+            button.cancel_gesture()
+        if self._rating_help_popup is not None:
+            self._rating_help_popup.dismiss()
         self.height_input.destroy()
         self.diameter_input.destroy()
 

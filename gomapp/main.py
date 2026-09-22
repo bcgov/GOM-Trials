@@ -51,7 +51,7 @@ from plyer import gps
 import sys
 
 
-from assessment_db import create_assessment, download_assessments, upload_assessments
+from assessment_db import create_assessment, download_assessments, upload_assessments, get_trial_assessment_uuids
 from config import DB_PATH, API_URL, USER_RE, icon_dict, ASSESSMENT_COLOURS
 from db_trials import upload_trials, download_trials, update_trial, update_trial_location, get_trial_row, get_photos_for_trial, upload_photos, get_trial_year_range, get_trial_owners, save_track, load_track, list_tracks, delete_track, export_gpx, ensure_trial_trees
 from db_users import db_connection, upload_trial_owners, download_users, upload_users, download_trial_owners, init_db, validate_photo_cache, list_users, get_current_user_uuid, set_current_user_uuid, load_current_user_profile, create_user_profile, get_active_user, fetch_users
@@ -1205,8 +1205,8 @@ class RootWidget(FloatLayout):
         )
         box.add_widget(info_label)
         
-        photo_paths = get_photos_for_trial(data['uuid']) ##make sure it returns None
-        if photo_paths:
+        photos = get_photos_for_trial(data['uuid'])
+        if photos:
             view_btn = Button(
                 text="View Photo",
                 size_hint_y=None,
@@ -1215,7 +1215,7 @@ class RootWidget(FloatLayout):
                 background_color=(0.2, 0.8, 0, 0.9),
             )
             view_btn.bind(
-                on_release=lambda *_: self.open_photo_carousel_popup(photo_paths)
+                on_release=lambda *_: self.open_photo_carousel_popup(photos)
             )
             box.add_widget(view_btn)
 
@@ -1251,7 +1251,8 @@ class RootWidget(FloatLayout):
         
         # --- Assessment ---
         growth_button = Button(
-            text="Add Assessment",
+            text=("View/Add Assessment" if get_trial_assessment_uuids(data['uuid'])
+                  else "Add Assessment"),
             size_hint_y=None,
             height=dp(80),
             background_normal="",
@@ -1304,22 +1305,50 @@ class RootWidget(FloatLayout):
             yes_btn.bind(on_release=lambda *_: (parent_popup.dismiss(), self.delete_trial(data)))
             no_btn.bind(on_release=lambda *_: parent_popup.dismiss())
     
-    def open_photo_carousel_popup(self, photo_paths, title="Photos"):
+    def photo_carousel_heading(self, photo):
+        if photo["assessment_uuid"] is None:
+            heading = "Trial Creation"
+        elif photo["assessment_number"] is not None:
+            heading = f"Assessment #{photo['assessment_number']}"
+        else:
+            heading = "Assessment (details unavailable)"
+
+        date = photo["photo_date"]
+        if date:
+            try:
+                date = datetime.datetime.fromisoformat(
+                    date.replace("Z", "+00:00")
+                ).strftime("%b %d, %Y")
+            except ValueError:
+                pass
+            heading += f" ({date})"
+        return heading
+
+    def open_photo_carousel_popup(self, photos, title="Photos"):
+        if not photos:
+            return
 
         carousel = Carousel(direction="right", loop=True)
 
-        # Optional counter label
-        counter = Label(size_hint_y=None, height=dp(28), text=f"1 / {len(photo_paths)}")
+        counter = Label(
+            size_hint_y=None, height=dp(52), halign="center",
+            text=f"{self.photo_carousel_heading(photos[0])}\n1 / {len(photos)}",
+        )
 
         def update_counter(*_):
-            counter.text = f"{carousel.index + 1} / {len(photo_paths)}"
+            index = carousel.index
+            if index is not None:
+                counter.text = (
+                    f"{self.photo_carousel_heading(photos[index])}\n"
+                    f"{index + 1} / {len(photos)}"
+                )
 
         carousel.bind(index=update_counter)
 
-        for p in photo_paths:
+        for photo in photos:
             # Async image loading + allow stretching
             img = Image(
-                source=p,
+                source=photo["path"],
                 allow_stretch=True,
                 keep_ratio=True
             )

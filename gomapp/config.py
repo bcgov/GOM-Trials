@@ -29,3 +29,12 @@ ASSESSMENT_COLOURS = {
     "Good":      (0.35, 0.75, 0.35, 1),
     "Excellent": (0.10, 0.45, 0.18, 1),
 }
+
+ASSESSMENT_HOVER = {
+    "Excellent": "Tree has good vigour and growth is outperforming other local species in area.",
+    "Good": "Tree is healthy, with good form. Few serious forest health factors noted. Tree appears well-adapted to site.",
+    "Fair": "Tree shows some damage, suboptimal growth, forest health issues or other evidence of some maladaptation but tree appears suitable to site.",
+    "Poor": "Tree has been severely damaged by environmental or forest health agents.",
+    "Dead": "Tree has died.",
+    "Mis": "Tree not found."
+}
