@@ -1771,12 +1771,11 @@ class TrialAssessmentPopup(Popup):
             pass
         rating_names = {code: name for name, code in self.RATINGS.items()}
         rating = entry["trial_rating"]
-        rating = rating_names.get(rating, rating) or "Not recorded"
-        performance = entry["performance"] or "Not available"
+        rating = rating_names.get(rating, rating) or None
+        performance = entry["performance"] or None
         return (
             f"{date}\n"
-            f"Calculated performance: {performance}\n"
-            f"User rating: {rating}"
+            f"{performance if performance is not None else rating}"
         )
 
     def open_attach_photo_menu(self, *_):
