@@ -295,6 +295,25 @@ def load_assessment(assessment_uuid):
         "trees": grid
     }
 
+def get_trial_assessment_history(trial_uuid):
+    """Return every assessment, including those without tree measurements."""
+    with db_connection() as conn:
+        rows = conn.execute("""
+            SELECT a.assessment_uuid, a.assessment_date,
+                   p.performance, a.trial_rating
+            FROM assessments a
+            LEFT JOIN assessment_performance p
+                ON p.assessment_uuid = a.assessment_uuid
+            WHERE a.trial_uuid = ?
+            ORDER BY datetime(a.assessment_date) DESC,
+                     a.created_at DESC, a.assessment_uuid DESC
+        """, (trial_uuid,)).fetchall()
+
+    return [dict(zip(
+        ("assessment_uuid", "assessment_date", "performance", "trial_rating"), row
+    )) for row in rows]
+
+
 def get_trial_assessment_uuids(trial_uuid):
 
     with db_connection() as conn:

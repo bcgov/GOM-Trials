@@ -26,7 +26,7 @@ from db_users import download_trial_owners
 from gom_logger import logger
 from utils import RoundedButton
 from assessment import AssessmentPanel, GrowthGrid, AssessmentNavigator
-from assessment_db import get_trial_assessment_uuids, load_assessment, create_assessment, get_grid_direction
+from assessment_db import get_trial_assessment_uuids, load_assessment, create_assessment, get_grid_direction, get_trial_assessment_history
 from db_trials import get_most_recent_trial, add_trial_owner, get_replicate_no, get_trial_owners, get_trial_year_range
 from db_users import load_current_user_profile, get_active_user, set_app_state, get_app_state
 from numeric_entry import NativeNumericField
@@ -1598,11 +1598,17 @@ class TrialAssessmentPopup(Popup):
         self.size_hint = (0.9, 0.75)
         self.auto_dismiss = False
 
+        layout = BoxLayout(orientation="vertical", spacing=dp(12))
+        scroll = ScrollView(do_scroll_x=False)
         root = BoxLayout(
             orientation="vertical",
             spacing=dp(12),
-            padding=dp(12)
+            padding=dp(12),
+            size_hint_y=None,
         )
+        root.bind(minimum_height=root.setter("height"))
+        scroll.add_widget(root)
+        layout.add_widget(scroll)
 
         # --------------------------------------------------
         # Overall rating
@@ -1639,7 +1645,9 @@ class TrialAssessmentPopup(Popup):
 
         self.notes_input = TextInput(
             multiline=True,
-            hint_text="Optional notes..."
+            hint_text="Optional notes...",
+            size_hint_y=None,
+            height=dp(96),
         )
 
         root.add_widget(
@@ -1685,6 +1693,24 @@ class TrialAssessmentPopup(Popup):
             self.tree_assessment_btn
         )
 
+        root.add_widget(Label(
+            text="Assessment History (newest first)",
+            bold=True, size_hint_y=None, height=dp(28),
+        ))
+        history = get_trial_assessment_history(self.data["uuid"])
+        history_text = "\n\n".join(
+            self.format_history_entry(entry) for entry in history
+        ) if history else "No assessments recorded yet."
+        history_label = Label(
+            text=history_text, size_hint_y=None,
+            halign="left", valign="top",
+        )
+        history_label.bind(
+            width=lambda label, width: setattr(label, "text_size", (width, None)),
+            texture_size=lambda label, size: setattr(label, "height", size[1]),
+        )
+        root.add_widget(history_label)
+
         # --------------------------------------------------
         # Buttons
         # --------------------------------------------------
@@ -1722,11 +1748,11 @@ class TrialAssessmentPopup(Popup):
             save_btn
         )
 
-        root.add_widget(
+        layout.add_widget(
             button_row
         )
 
-        self.content = root
+        self.content = layout
 
         # --------------------------------------------------
         # Existing values
@@ -1734,6 +1760,24 @@ class TrialAssessmentPopup(Popup):
 
         if existing is not None:
             self.load(existing)
+
+    def format_history_entry(self, entry):
+        date = entry["assessment_date"] or "Unknown date"
+        try:
+            date = datetime.datetime.fromisoformat(
+                date.replace("Z", "+00:00")
+            ).strftime("%b %d, %Y")
+        except ValueError:
+            pass
+        rating_names = {code: name for name, code in self.RATINGS.items()}
+        rating = entry["trial_rating"]
+        rating = rating_names.get(rating, rating) or "Not recorded"
+        performance = entry["performance"] or "Not available"
+        return (
+            f"{date}\n"
+            f"Calculated performance: {performance}\n"
+            f"User rating: {rating}"
+        )
 
     def open_attach_photo_menu(self, *_):
         box = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(12))
