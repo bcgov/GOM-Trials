@@ -1103,7 +1103,7 @@ class AssessmentPopup(Popup):
         self.separator_height = 0
 
         self.assessment_uuids = get_trial_assessment_uuids(
-            self.marker['uuid']
+            self.marker['uuid'], trees_only=True
         )
 
         self.grid_corner_direction = get_grid_direction(

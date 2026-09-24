@@ -910,6 +910,7 @@ function(req, res) {
 #* @serializer json
 function(since = NULL, res) {
   con <- pg_connect()
+  on.exit(DBI::dbDisconnect(con), add = TRUE)
   if (is.null(since) || !nzchar(since)) {
     
     assessments <- DBI::dbGetQuery(
@@ -948,7 +949,7 @@ function(since = NULL, res) {
       FROM assessments a
       JOIN gom_trials t
         ON a.trial_uuid = t.uuid::uuid
-      WHERE a.created_at > $1
+      WHERE a.created_at >= $1::timestamptz
       ORDER BY a.created_at
       ",
       params = list(since)
@@ -1069,7 +1070,7 @@ function(since = NULL, res) {
       assessment_date = json_value(a$assessment_date),
       trial_rating = json_value(a$trial_rating),
       notes = json_value(a$notes),
-      created_at = json_value(a$created_at),
+      created_at = json_value(format(a$created_at, "%Y-%m-%dT%H:%M:%OS6Z", tz = "UTC")),
       grid_direction = json_value(a$grid_direction),
       trees = tree_list
     )

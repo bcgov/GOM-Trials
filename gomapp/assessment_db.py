@@ -80,7 +80,16 @@ def create_assessment(
         # --------------------------------------------------
         # Persistent trees
         # --------------------------------------------------
-        if grid_data is not None:
+        # An opened but untouched grid is not a tree assessment. Zero-valued
+        # measurements and explicit missing/dead ratings still count as data.
+        has_tree_data = any(
+            tree.get("rating") not in (None, "", "-")
+            or tree.get("height") is not None
+            or tree.get("diameter") is not None
+            or bool(tree.get("damage"))
+            for row in (grid_data or []) for tree in row
+        )
+        if has_tree_data:
             trees = conn.execute("""
                 SELECT
                     tree_uuid,
@@ -314,17 +323,30 @@ def get_trial_assessment_history(trial_uuid):
     )) for row in rows]
 
 
-def get_trial_assessment_uuids(trial_uuid):
+def get_trial_assessment_uuids(trial_uuid, trees_only=False):
 
     with db_connection() as conn:
 
         rows = conn.execute("""
-            SELECT assessment_uuid
-            FROM assessments
-            WHERE trial_uuid = ?
-            ORDER BY assessment_date ASC,
-                     created_at ASC
-        """, (trial_uuid,)).fetchall()
+            SELECT a.assessment_uuid
+            FROM assessments a
+            WHERE a.trial_uuid = ?
+              AND (? = 0 OR EXISTS (
+                  SELECT 1 FROM tree_assessments ta
+                  WHERE ta.assessment_uuid = a.assessment_uuid
+                    AND (
+                        COALESCE(ta.rating, '-') NOT IN ('', '-')
+                        OR ta.height IS NOT NULL
+                        OR ta.diameter IS NOT NULL
+                        OR EXISTS (
+                            SELECT 1 FROM assessment_damage d
+                            WHERE d.tree_assessment_uuid = ta.tree_assessment_uuid
+                        )
+                    )
+              ))
+            ORDER BY datetime(a.assessment_date) ASC,
+                     a.created_at ASC, a.assessment_uuid ASC
+        """, (trial_uuid, trees_only)).fetchall()
 
     return [row[0] for row in rows]
 
@@ -592,6 +614,17 @@ def upload_assessments():
 
 def download_assessments(since=None):
 
+    if since is None:
+        with db_connection() as conn:
+            latest = conn.execute("""
+                SELECT server_created_at FROM assessments
+                WHERE server_created_at IS NOT NULL
+                ORDER BY julianday(server_created_at) DESC, server_created_at DESC
+                LIMIT 1
+            """).fetchone()
+        if latest is not None:
+            since = latest[0]
+
     params = {}
 
     if since is not None:
@@ -696,12 +729,13 @@ def save_downloaded_assessment(assessment):
                 trial_rating,
                 notes,
                 created_at,
+                server_created_at,
                 synced
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
 
             ON CONFLICT(assessment_uuid)
-            DO NOTHING
+            DO UPDATE SET server_created_at = excluded.server_created_at
         """, (
             assessment_uuid,
             trial_uuid,
@@ -709,6 +743,7 @@ def save_downloaded_assessment(assessment):
             assessment["assessment_date"],
             assessment.get("trial_rating"),
             assessment.get("notes"),
+            assessment.get("created_at"),
             assessment.get("created_at"),
         ))
 

@@ -34,6 +34,9 @@ def column_exists(conn, table, column):
     return any(row[1] == column for row in rows)
 
 def migrate_db(conn):
+    # Device-created timestamps cannot safely be used as a cloud download cursor.
+    if not column_exists(conn, "assessments", "server_created_at"):
+        conn.execute("ALTER TABLE assessments ADD COLUMN server_created_at TEXT")
     # Photos may be downloaded independently of assessment records.
     if not column_exists(conn, "trial_photos", "assessment_uuid"):
         conn.execute("ALTER TABLE trial_photos ADD COLUMN assessment_uuid TEXT")
