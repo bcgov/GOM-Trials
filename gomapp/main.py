@@ -335,6 +335,7 @@ class RootWidget(FloatLayout):
         self.trial_markers = []     # list of marker widgets
         self.trial_marker_uuids = set()   # fast duplicate check
         self.gps_fix = None
+        self._gps_redraw = Clock.create_trigger(self._refresh_gps_marker, 0)
         self.sync_status = SyncStatus()
         self.sync_status_bar = SyncStatusBar(
             status=self.sync_status,
@@ -783,15 +784,13 @@ class RootWidget(FloatLayout):
             print("⚠️ Could not refresh active user label:", e)
             self.active_user_lbl.text = "Active Planter: (error)"
         
-    @mainthread
+    def _refresh_gps_marker(self, _dt):
+        if self.gps_fix is not None:
+            fix = self.gps_fix
+            self.set_marker(fix["lat"], fix["lon"], fix["elev"], fix["accuracy"])
+
     def set_marker(self, lat, lon, elev, acc):
-        self.gps_fix = {
-            "lat": lat,
-            "lon": lon,
-            "elev": elev,
-            "accuracy": acc,
-            "timestamp": time.monotonic(),
-        }
+        # Called only by the UI-clock trigger. Recording happens at receipt.
         # 2) Create/update marker
         if self.marker is None:
             self.marker = MapMarker(lat=lat, lon=lon, source="Position_icon32.png")
@@ -801,11 +800,6 @@ class RootWidget(FloatLayout):
             self.mapview.remove_marker(self.marker)
             self.marker = MapMarker(lat=lat, lon=lon, source="Position_icon32.png")
             self.mapview.add_marker(self.marker)
-
-        if self.track_logging:
-            self.track_recorder.add_fix(
-                self.gps_fix
-            )
 
     def get_current_gps(self):
         return self.gps_fix
@@ -1537,7 +1531,6 @@ class TreeApp(App):
     def stop(self):
         gps.stop()
 
-    @mainthread
     def on_location(self, **kwargs):
         lat, lon, elev, acc = kwargs.get("lat"), kwargs.get("lon"), kwargs.get("altitude"), kwargs.get("accuracy")
         # print(f"📍 GPS update: {lat}, {lon}, elev={elev}")
@@ -1548,15 +1541,30 @@ class TreeApp(App):
 
         try:
             rw = self.get_root_widget()
-            Clock.schedule_once(lambda dt: rw.set_marker(lat, lon, elev, acc))
+            if lat is None or lon is None:
+                return
+            fix = {
+                "lat": lat, "lon": lon, "elev": elev, "accuracy": acc,
+                "timestamp": time.monotonic(),
+            }
+            rw.gps_fix = fix
+            accepted = rw.track_recorder.add_fix(fix) if rw.track_logging else False
+            if getattr(self, "_in_background", False):
+                self._background_fixes += 1
+                self._background_points += int(accepted)
+            else:
+                rw._gps_redraw()
         except Exception as e:
-            print("⚠️ Could not set marker:", e)
+            logger.exception("[GPS] Could not process location")
         
     @mainthread
     def on_status(self, stype, status):
         self.gps_status = 'type={}\n{}'.format(stype, status)
 
     def on_pause(self):
+        self._in_background = True
+        self._background_fixes = 0
+        self._background_points = 0
         rw = self.get_root_widget() if self.root else None
         self._gps_stopped_for_pause = not (rw and rw.track_logging)
         if self._gps_stopped_for_pause:
@@ -1566,9 +1574,16 @@ class TreeApp(App):
         return True
 
     def on_resume(self):
+        self._in_background = False
         if getattr(self, "_gps_stopped_for_pause", True):
             gps.start(minTime=500, minDistance=0.5)
-        logger.info("[GPS] App resumed")
+        rw = self.get_root_widget() if self.root else None
+        if rw is not None:
+            rw._gps_redraw()
+            rw.track_layer.request_redraw()
+        logger.info("[GPS] App resumed; background fixes: %d; recorded points: %d",
+                    getattr(self, "_background_fixes", 0),
+                    getattr(self, "_background_points", 0))
 
 if __name__ == "__main__":
     TreeApp().run()

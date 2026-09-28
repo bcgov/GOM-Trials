@@ -1,6 +1,7 @@
 import datetime
 
 from kivy.graphics import Color, Line
+from kivy.clock import Clock
 from kivy_garden.mapview import MapLayer
 import math
 import time
@@ -28,6 +29,7 @@ class TrackLayer(MapLayer):
         super().__init__(**kwargs)
 
         self.tracks = []
+        self.request_redraw = Clock.create_trigger(lambda _dt: self.reposition(), 0)
 
         self.color = color
         self.line_width = line_width
@@ -56,7 +58,9 @@ class TrackLayer(MapLayer):
             self.new_track()
 
         self.tracks[-1].append((lat, lon))
-        self.reposition()
+        # Store immediately, including during background location callbacks.
+        # Only canvas work waits for Kivy's UI clock; repeated redraws coalesce.
+        self.request_redraw()
 
     # ------------------------------------------------------------------
     # Drawing
