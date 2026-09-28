@@ -1557,12 +1557,18 @@ class TreeApp(App):
         self.gps_status = 'type={}\n{}'.format(stype, status)
 
     def on_pause(self):
-        gps.stop()
+        rw = self.get_root_widget() if self.root else None
+        self._gps_stopped_for_pause = not (rw and rw.track_logging)
+        if self._gps_stopped_for_pause:
+            gps.stop()
+        logger.info("[GPS] App paused; keep recording: %s",
+                    not self._gps_stopped_for_pause)
         return True
 
     def on_resume(self):
-        gps.start(500, 0)
-        pass
+        if getattr(self, "_gps_stopped_for_pause", True):
+            gps.start(minTime=500, minDistance=0.5)
+        logger.info("[GPS] App resumed")
 
 if __name__ == "__main__":
     TreeApp().run()
