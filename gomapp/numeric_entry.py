@@ -45,9 +45,8 @@ class NativeNumericField(Widget):
             text=self._update_text,
             placeholder=self._update_placeholder,
         )
-        Window.bind(
-            on_resize=lambda *_: self._update_frame()
-        )
+        self._resize_callback = self._update_frame
+        Window.bind(on_resize=self._resize_callback)
 
         self.bridge.show()
 

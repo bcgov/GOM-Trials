@@ -34,6 +34,11 @@ def column_exists(conn, table, column):
     return any(row[1] == column for row in rows)
 
 def migrate_db(conn):
+    if not column_exists(conn, "assessments", "prevalent_damage_code"):
+        conn.execute("ALTER TABLE assessments ADD COLUMN prevalent_damage_code TEXT")
+    if not column_exists(conn, "assessments", "survival_percent"):
+        conn.execute("""ALTER TABLE assessments ADD COLUMN survival_percent REAL
+                        CHECK (survival_percent BETWEEN 0 AND 100)""")
     # Device-created timestamps cannot safely be used as a cloud download cursor.
     if not column_exists(conn, "assessments", "server_created_at"):
         conn.execute("ALTER TABLE assessments ADD COLUMN server_created_at TEXT")
@@ -210,6 +215,8 @@ def init_assessment_tables(c):
 
             trial_rating TEXT,
             notes TEXT,
+            prevalent_damage_code TEXT,
+            survival_percent REAL CHECK (survival_percent BETWEEN 0 AND 100),
 
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,

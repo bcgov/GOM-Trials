@@ -772,9 +772,11 @@ function(req, res) {
               user_uuid,
               assessment_date,
               trial_rating,
-              notes
+              notes,
+              prevalent_damage_code,
+              survival_percent
           )
-          VALUES ($1, $2, $3, $4, $5, $6)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 
           ON CONFLICT (assessment_uuid)
           DO NOTHING
@@ -785,7 +787,9 @@ function(req, res) {
             assessment$user_uuid,
             assessment$assessment_date,
             db_char(assessment$trial_rating),
-            db_char(assessment$notes)
+            db_char(assessment$notes),
+            db_char(assessment$prevalent_damage_code),
+            db_num(assessment$survival_percent)
           )
         )
         
@@ -924,6 +928,8 @@ function(since = NULL, res) {
           a.trial_rating,
           a.notes,
           a.created_at,
+          a.prevalent_damage_code,
+          a.survival_percent,
           t.grid_direction
       FROM assessments a
       JOIN gom_trials t
@@ -945,6 +951,8 @@ function(since = NULL, res) {
           a.trial_rating,
           a.notes,
           a.created_at,
+          a.prevalent_damage_code,
+          a.survival_percent,
           t.grid_direction
       FROM assessments a
       JOIN gom_trials t
@@ -1069,6 +1077,8 @@ function(since = NULL, res) {
       user_uuid = json_value(a$user_uuid),
       assessment_date = json_value(a$assessment_date),
       trial_rating = json_value(a$trial_rating),
+      prevalent_damage_code = json_value(a$prevalent_damage_code),
+      survival_percent = json_value(a$survival_percent),
       notes = json_value(a$notes),
       created_at = json_value(format(a$created_at, "%Y-%m-%dT%H:%M:%OS6Z", tz = "UTC")),
       grid_direction = json_value(a$grid_direction),

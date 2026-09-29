@@ -1437,6 +1437,8 @@ class RootWidget(FloatLayout):
             trial_rating=ass_data.get("trial_rating", None),
             notes=ass_data.get("notes", None),
             photo_paths=ass_data.get("photo_paths", []),
+            prevalent_damage_code=ass_data.get("prevalent_damage_code"),
+            survival_percent=ass_data.get("survival_percent"),
         )
         self.refresh_sync_status()
             

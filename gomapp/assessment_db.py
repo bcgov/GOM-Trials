@@ -37,7 +37,13 @@ def create_assessment(
     notes = None,
     assessment_date=None,
     photo_paths=None,
+    prevalent_damage_code=None,
+    survival_percent=None,
 ):
+    if survival_percent is not None:
+        survival_percent = float(survival_percent)
+        if not 0 <= survival_percent <= 100:
+            raise ValueError("Estimated survival must be between 0 and 100.")
     assessment_uuid = str(uuid.uuid4())
 
     if assessment_date is None:
@@ -57,16 +63,20 @@ def create_assessment(
                 assessment_date,
                 trial_rating,
                 notes,
+                prevalent_damage_code,
+                survival_percent,
                 synced
             )
-            VALUES (?, ?, ?, ?, ?, ?, 0)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
         """, (
             assessment_uuid,
             trial_uuid,
             user_uuid,
             assessment_date,
             trial_rating,
-            notes
+            notes,
+            prevalent_damage_code,
+            survival_percent,
         ))
 
         if direction is not None:
@@ -194,7 +204,9 @@ def load_assessment(assessment_uuid):
                 u.username,
                 a.assessment_date,
                 a.trial_rating,
-                a.notes
+                a.notes,
+                a.prevalent_damage_code,
+                a.survival_percent
             FROM assessments a
             LEFT JOIN users u
               ON a.user_uuid = u.user_uuid
@@ -301,6 +313,8 @@ def load_assessment(assessment_uuid):
         "assessment_date": assessment[4],
         "trial_rating": assessment[5],
         "notes": assessment[6],
+        "prevalent_damage_code": assessment[7],
+        "survival_percent": assessment[8],
         "trees": grid
     }
 
@@ -381,7 +395,8 @@ def upload_assessments():
                 a.assessment_date,
                 a.trial_rating,
                 a.notes,
-                t.grid_direction
+                t.grid_direction,
+                a.prevalent_damage_code, a.survival_percent
             FROM assessments a
             JOIN trials t
             ON a.trial_uuid = t.uuid
@@ -402,7 +417,9 @@ def upload_assessments():
             assessment_date,
             trial_rating,
             notes,
-            grid_direction
+            grid_direction,
+            prevalent_damage_code,
+            survival_percent,
         ) in assessments:
 
             # --------------------------------------------------
@@ -515,6 +532,8 @@ def upload_assessments():
 
                 "trees":
                     trees,
+                "prevalent_damage_code": prevalent_damage_code,
+                "survival_percent": survival_percent,
 
                 "grid_direction":
                     grid_direction
@@ -730,9 +749,11 @@ def save_downloaded_assessment(assessment):
                 notes,
                 created_at,
                 server_created_at,
+                prevalent_damage_code,
+                survival_percent,
                 synced
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
 
             ON CONFLICT(assessment_uuid)
             DO UPDATE SET server_created_at = excluded.server_created_at
@@ -745,6 +766,8 @@ def save_downloaded_assessment(assessment):
             assessment.get("notes"),
             assessment.get("created_at"),
             assessment.get("created_at"),
+            assessment.get("prevalent_damage_code"),
+            assessment.get("survival_percent"),
         ))
 
         # --------------------------------------------------

@@ -30,6 +30,7 @@ from assessment_db import get_trial_assessment_uuids, load_assessment, create_as
 from db_trials import get_most_recent_trial, add_trial_owner, get_replicate_no, get_trial_owners, get_trial_year_range
 from db_users import load_current_user_profile, get_active_user, set_app_state, get_app_state
 from numeric_entry import NativeNumericField
+from config import damage_dict
 
 SMR_OPTIONS = ["(Select)", "0 - Very Xeric", "1 - Xeric", "2 - Subxeric", "3 - Submesic", "4 - Mesic", "5 - Subhygric", "6 - Hygric", "7 - Subhydric", "8 - Hydric"]
 SNR_OPTIONS = ["(Select)", "A - Very Poor", "B - Poor", "C - Medium", "D - Rich", "E - Very Rich", "F - Saline/Alkaline"]
@@ -1593,6 +1594,8 @@ class TrialAssessmentPopup(Popup):
         self.save_callback = save_callback
         self.direction = None
         self.tree_data = None
+        self._survival_overlay = False
+        self._survival_destroyed = False
 
         self.title = "Trial Assessment"
         self.size_hint = (0.9, 0.75)
@@ -1630,6 +1633,35 @@ class TrialAssessmentPopup(Popup):
         root.add_widget(
             self.rating_spinner
         )
+
+        root.add_widget(Label(text="Most prevalent damage agent",
+                              size_hint_y=None, height=dp(28)))
+        self.damage_spinner = Spinner(
+            text="Not recorded", values=["Not recorded", *damage_dict.keys()],
+            size_hint_y=None, height=dp(44),
+        )
+        root.add_widget(self.damage_spinner)
+        root.add_widget(Label(text="Estimated survival (%)",
+                              size_hint_y=None, height=dp(28)))
+        self.survival_input = NativeNumericField(
+            decimal=True, placeholder="Optional: 0–100",
+            size_hint_y=None, height=dp(44),
+        )
+        root.add_widget(self.survival_input)
+        self.survival_error = Label(text="", color=(1, 0.3, 0.3, 1),
+                                    size_hint_y=None, height=dp(24))
+        root.add_widget(self.survival_error)
+        self._assessment_scroll = scroll
+        self.survival_input.bind(pos=self._update_survival_visibility,
+                                 size=self._update_survival_visibility)
+        scroll.bind(scroll_y=self._update_survival_visibility,
+                    pos=self._update_survival_visibility,
+                    size=self._update_survival_visibility)
+        root.bind(pos=self._update_survival_visibility)
+        self.rating_spinner.bind(is_open=self._update_survival_visibility)
+        self.damage_spinner.bind(is_open=self._update_survival_visibility)
+        self.bind(on_dismiss=self._destroy_survival_input)
+        Clock.schedule_once(self._update_survival_visibility, 0)
 
         # --------------------------------------------------
         # Notes
@@ -1761,6 +1793,32 @@ class TrialAssessmentPopup(Popup):
         if existing is not None:
             self.load(existing)
 
+    def _destroy_survival_input(self, *_):
+        self._survival_destroyed = True
+        self.survival_input.destroy()
+
+    def _update_survival_visibility(self, *_):
+        if self._survival_destroyed:
+            return
+        field = self.survival_input
+        scroll = self._assessment_scroll
+        _, bottom, _ = field.get_window_matrix().transform_point(0, 0, 0)
+        _, viewport_bottom, _ = scroll.get_window_matrix().transform_point(0, 0, 0)
+        visible = (not self._survival_overlay
+                   and not self.rating_spinner.is_open
+                   and not self.damage_spinner.is_open
+                   and viewport_bottom <= bottom
+                   and bottom + field.height <= viewport_bottom + scroll.height)
+        if visible:
+            field.show_native()
+        else:
+            field.blur()
+            field.hide_native()
+
+    def _restore_survival_input(self, *_):
+        self._survival_overlay = False
+        self._update_survival_visibility()
+
     def format_history_entry(self, entry):
         date = entry["assessment_date"] or "Unknown date"
         try:
@@ -1779,6 +1837,8 @@ class TrialAssessmentPopup(Popup):
         )
 
     def open_attach_photo_menu(self, *_):
+        self._survival_overlay = True
+        self.survival_input.hide_native()
         box = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(12))
         btns = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(10))
 
@@ -1790,6 +1850,8 @@ class TrialAssessmentPopup(Popup):
 
         p = Popup(title="Attach photo", content=box, size_hint=(0.9, None), height=dp(180), auto_dismiss=True)
 
+        p.bind(on_dismiss=self._restore_survival_input)
+
         def pick(source):
             p.dismiss()
             self.start_photo_pick(source)
@@ -1800,9 +1862,12 @@ class TrialAssessmentPopup(Popup):
         p.open()
 
     def start_photo_pick(self, source: str):
+        self._survival_overlay = True
+        self.survival_input.hide_native()
         PHOTO_PICKER.pick(source, on_done=self.on_photo_picked)
 
     def on_photo_picked(self, path: str | None):
+        self._restore_survival_input()
         if not path:
             return  # cancelled
 
@@ -1815,11 +1880,14 @@ class TrialAssessmentPopup(Popup):
 
     def open_tree_assessment(self, *_):
 
+        self._survival_overlay = True
+        self.survival_input.hide_native()
         popup = AssessmentPopup(
             marker=self.data,
             existing=None,
             save_callback=self.save_from_tree_ass
         )
+        popup.bind(on_dismiss=self._restore_survival_input)
         popup.open()
 
     def save_from_tree_ass(self, marker, grid_data, direction):
@@ -1832,12 +1900,24 @@ class TrialAssessmentPopup(Popup):
         self.save_all()
 
     def save_all(self, *_):
+        self.survival_input._poll(0)
+        text = self.survival_input.text.strip()
+        try:
+            survival = float(text) if text else None
+            if survival is not None and not 0 <= survival <= 100:
+                raise ValueError()
+        except ValueError:
+            self.survival_error.text = "Enter a survival percentage from 0 to 100."
+            return
+        self.survival_error.text = ""
         rating = self.rating_spinner.text
         notes = self.notes_input.text.strip()
         ass = {
             "trial_rating": None,
             "notes": None,
             "photo_paths": list(self.photo_paths),
+            "prevalent_damage_code": damage_dict.get(self.damage_spinner.text),
+            "survival_percent": survival,
         }
         if rating != "General Vigour":
             ass["trial_rating"] = rating
